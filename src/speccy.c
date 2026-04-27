@@ -153,6 +153,23 @@ static void tick_release_latches(speccy_t *vm) {
         vm->last_released_packed = (uint8_t)((row << 3) | col);
     }
     speccy_set_key(vm, row, col, pressed);
+
+    /* DOWN+UP coalescing: if the next event is the matching UP for
+     * the key we just pressed, drain it now too. The release latch
+     * then holds the matrix bit cleared so BASIC still sees the
+     * press for KEY_RELEASE_LATCH IRQ frames. Halves per-keystroke
+     * latency by eliminating one drain frame per char (DOWN at
+     * frame N, UP also at N, instead of UP at N+1). */
+    if (pressed && vm->hid_head != vm->hid_tail) {
+        uint8_t row2, col2;
+        bool    pressed2;
+        hid_unpack(vm->hid_queue[vm->hid_head], &row2, &col2, &pressed2);
+        if (!pressed2 && row2 == row && col2 == col) {
+            vm->hid_head = (uint8_t)((vm->hid_head + 1) % HID_QSIZE);
+            vm->last_released_packed = (uint8_t)((row << 3) | col);
+            speccy_set_key(vm, row, col, false);
+        }
+    }
 }
 
 uint32_t speccy_step_frame(speccy_t *vm) {

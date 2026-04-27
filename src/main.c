@@ -77,10 +77,15 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         uart_init(fdt_addr_of(&fdt, "ns16550a",              RVVM_UART_BASE));
         pci_init(fdt_addr_of(&fdt, "pci-host-ecam-generic",  RVVM_PCI_ECAM_BASE));
         i2c_init(fdt_addr_of(&fdt, "opencores,i2c-ocores",   RVVM_I2C_OC_BASE));
+        uint32_t cpus_off = fdt_find_node_named(&fdt, "cpus");
+        uint32_t hz = 0;
+        if (cpus_off != UINT32_MAX) fdt_node_prop_u32(&fdt, cpus_off, "timebase-frequency", &hz);
+        time_init(fdt_addr_of(&fdt, "sifive,clint0",         RVVM_CLINT_BASE), hz);
     } else {
         uart_puts("warn: FDT invalid, using rvvm.h fallback addresses\n");
         pci_init(0);
         i2c_init(RVVM_I2C_OC_BASE);
+        time_init(RVVM_CLINT_BASE, 0);
     }
     hid_kb_init(&kb, RVVM_I2C_HID_KEYBOARD);
 
@@ -125,7 +130,7 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;
 
-    uint64_t deadline = time_now() + RVVM_TICKS_PER_FRAME;
+    uint64_t deadline = time_now() + time_ticks_per_frame();
     for (;;) {
         hid_kb_poll(&kb, on_key, NULL);
         debug_poll(&vm, (uint32_t)vm.frame_count);
@@ -134,6 +139,6 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
             speccy_render(&vm, &g, x_off, y_off, DISPLAY_SCALE);
         }
         time_busy_until(deadline);
-        deadline += RVVM_TICKS_PER_FRAME;
+        deadline += time_ticks_per_frame();
     }
 }

@@ -1,0 +1,7 @@
+build/
+*.o
+firmware.elf
+firmware.bin
+.direnv/
+result
+result-*

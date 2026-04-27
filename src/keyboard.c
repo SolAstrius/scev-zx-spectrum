@@ -103,6 +103,32 @@ static const key_def_t kbd_table[0xE8] = {
     /* CAPS LOCK on host = CS+2 on Speccy (toggle CAPS LOCK). */
     [0x39] = CS(3, 1),
 
+    /* Numeric keypad — same Speccy keys as the top-row digits.
+     * Useful for keyboards with a numpad even if the user uses it
+     * for digits; also catches non-US layouts where the alpha-row
+     * digit keys may come through with non-standard shifted keysyms
+     * that RVVM happens to map to KP* HID usages (e.g. XKB_KEY_plus
+     * → HID_KEY_KPPLUS). */
+    [0x59] = DIGIT(3, 0),  /* KP1 */
+    [0x5A] = DIGIT(3, 1),  /* KP2 */
+    [0x5B] = DIGIT(3, 2),  /* KP3 */
+    [0x5C] = DIGIT(3, 3),  /* KP4 */
+    [0x5D] = DIGIT(3, 4),  /* KP5 */
+    [0x5E] = DIGIT(4, 4),  /* KP6 */
+    [0x5F] = DIGIT(4, 3),  /* KP7 */
+    [0x60] = DIGIT(4, 2),  /* KP8 */
+    [0x61] = DIGIT(4, 1),  /* KP9 */
+    [0x62] = DIGIT(4, 0),  /* KP0 */
+    [0x58] = PLAIN(6, 0),  /* KP_ENTER */
+
+    /* Symbol HID usages — RVVM maps `+` keysym → KPPLUS regardless
+     * of layout, so include the keypad-symbol set too. */
+    [0x57] = SYM(6, 2, 6, 2),  /* KPPLUS    → SS+K (+) */
+    [0x56] = SYM(6, 3, 4, 0),  /* KPMINUS   → SS+J (-) / shifted SS+0 (_) */
+    [0x55] = SYM(7, 4, 7, 4),  /* KPASTRSK  → SS+B (*) */
+    [0x54] = SYM(0, 4, 0, 4),  /* KPSLASH   → SS+V (/) */
+    [0x67] = SYM(6, 1, 6, 2),  /* KPEQUAL   → SS+L (=) / SS+K (+) */
+
     /* Modifier keys themselves: NOT in this table. They're handled
      * specially by speccy_hid_event so it can track shift state and
      * synthesise chord prefixes. The table never returns a shift-key

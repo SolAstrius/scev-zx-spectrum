@@ -277,6 +277,58 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                     (uint64_t)vm->mem[0x5C3A]);
         break;
     }
+    case 'v': {
+        /* "Visualise" — render the entire 24×32 character grid as
+         * ASCII over UART. For each cell we read the 8 bitmap bytes
+         * (honouring the interleaved address scheme) and compare to
+         * the embedded Spectrum charset at ROM 0x3D00. A match prints
+         * the ASCII char; otherwise '?'. Inverted cells (paper darker
+         * than ink under a non-FLASH attribute) are preserved as the
+         * underlying char — we don't visualise colour.
+         *
+         * This is the cheapest "screenshot" we have without bochs. */
+        uart_puts("\n+");
+        for (int i = 0; i < 32; i++) uart_putc('-');
+        uart_puts("+\n");
+        for (uint32_t row = 0; row < 24; row++) {
+            uart_putc('|');
+            for (uint32_t col = 0; col < 32; col++) {
+                /* Read the 8 bitmap bytes for cell (col, row). */
+                uint8_t cell[8];
+                bool empty = true;
+                for (uint32_t lic = 0; lic < 8; lic++) {
+                    uint32_t y_pix = row * 8 + lic;
+                    uint32_t third = y_pix >> 6;
+                    uint32_t lit   = y_pix & 0x3F;
+                    uint32_t cr    = lit >> 3;
+                    uint32_t lic2  = lit & 7;
+                    uint32_t addr  = 0x4000 + (third << 11) + (lic2 << 8) + (cr << 5) + col;
+                    cell[lic] = vm->mem[addr];
+                    if (cell[lic] != 0) empty = false;
+                }
+                if (empty) {
+                    uart_putc(' ');
+                    continue;
+                }
+                /* Compare against ASCII chars 0x20..0x7F at ROM[0x3D00 + (c-0x20)*8]. */
+                char found = '?';
+                for (int c = 0x20; c < 0x80; c++) {
+                    const uint8_t *gp = &vm->mem[0x3D00 + (c - 0x20) * 8];
+                    bool match = true;
+                    for (int i = 0; i < 8; i++) {
+                        if (cell[i] != gp[i]) { match = false; break; }
+                    }
+                    if (match) { found = (char)c; break; }
+                }
+                uart_putc(found);
+            }
+            uart_puts("|\n");
+        }
+        uart_puts("+");
+        for (int i = 0; i < 32; i++) uart_putc('-');
+        uart_puts("+\n");
+        break;
+    }
     case 's': {
         /* Snapshot of the bottom 2 rows of screen RAM (the BASIC
          * edit area) + their attributes. The K cursor lives here. */
@@ -317,6 +369,7 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                   "  i         toggle Z80Interrupt injection\n"
                   "  t         single-shot 16-step PC trace\n"
                   "  k         dump keyboard matrix + LAST_K/FLAGS sysvars\n"
+                  "  v         visualise screen as ASCII (24×32)\n"
                   "  s         snapshot bottom-of-screen text + cursor pos\n"
                   "  r         reset Z80 core\n"
                   "  h         this help\n");

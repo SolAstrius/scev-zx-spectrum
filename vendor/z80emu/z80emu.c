@@ -2223,18 +2223,27 @@ emulate_next_instruction:
                                 int     n;
 
                                 READ_N(n);
-                                Z80_INPUT_BYTE(n, A);
+                                /* SCEV PATCH: real Z80 places A on
+                                 * address bits 15..8 during IN (n),A;
+                                 * many machines (Speccy keyboard, in
+                                 * particular) decode on the high byte
+                                 * too. Stock z80emu drops it. */
+                                Z80_INPUT_BYTE(((A) << 8) | (n), A);
 
                                 elapsed_cycles += 4;
 
                                 break;
 
-                        }       
+                        }
 
                         case IN_R_C: {
 
-                                int     x;                                           
-                                Z80_INPUT_BYTE(C, x);
+                                int     x;
+                                /* SCEV PATCH: IN r,(C) places BC on
+                                 * the address bus. Pass the full 16-bit
+                                 * port so Speccy keyboard row-selection
+                                 * (high byte) reaches our speccy_in. */
+                                Z80_INPUT_BYTE(BC, x);
                                 if (Y(opcode) != INDIRECT_HL) 
 
                                         R(Y(opcode)) = x;
@@ -2258,7 +2267,7 @@ emulate_next_instruction:
 
                                 int     x, f;
 
-                                Z80_INPUT_BYTE(C, x);
+                                Z80_INPUT_BYTE(BC, x);   /* SCEV PATCH: full 16-bit port */
                                 WRITE_BYTE(HL, x);
 
                                 f = SZYX_FLAGS_TABLE[--B & 0xff]
@@ -2308,8 +2317,8 @@ emulate_next_instruction:
                                 for ( ; ; ) {
 
                                         r += 2;
-                
-                                        Z80_INPUT_BYTE(C, x);
+
+                                        Z80_INPUT_BYTE(BC, x);   /* SCEV PATCH: full 16-bit port */
                                         Z80_WRITE_BYTE(hl, x);
 
                                         hl += d;
@@ -2372,13 +2381,14 @@ emulate_next_instruction:
                                 int     n;
 
                                 READ_N(n);
-                                Z80_OUTPUT_BYTE(n, A);
+                                /* SCEV PATCH: full 16-bit port w/ A on high byte */
+                                Z80_OUTPUT_BYTE(((A) << 8) | (n), A);
 
                                 elapsed_cycles += 4;
 
                                 break;
 
-                        }       
+                        }
 
                         case OUT_C_R: {
 
@@ -2387,7 +2397,7 @@ emulate_next_instruction:
                                 x = Y(opcode) != INDIRECT_HL
                                         ? R(Y(opcode))
                                         : 0;
-                                Z80_OUTPUT_BYTE(C, x);
+                                Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
 
                                 elapsed_cycles += 4;
 
@@ -2400,7 +2410,7 @@ emulate_next_instruction:
                                 int     x, f;
 
                                 READ_BYTE(HL, x);
-                                Z80_OUTPUT_BYTE(C, x);
+                                Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
 
                                 HL += opcode == OPCODE_OUTI ? +1 : -1;
 
@@ -2432,10 +2442,10 @@ emulate_next_instruction:
                                         r += 2;
 
                                         Z80_READ_BYTE(hl, x);
-                                        Z80_OUTPUT_BYTE(C, x);
+                                        Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
 
                                         hl += d;
-                                        if (--b) 
+                                        if (--b)
 
                                                 elapsed_cycles += 21;
 

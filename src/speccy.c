@@ -18,6 +18,9 @@ void speccy_reset(speccy_t *vm) {
      * because the ULA only owns bits 0..4. */
     for (int i = 0; i < 8; i++) vm->kbd[i] = 0xFF;
     for (int i = 0; i < 8 * 5; i++) vm->release_latch[i] = 0;
+    vm->hid_head     = 0;
+    vm->hid_tail     = 0;
+    vm->gap_frames   = 0;
     vm->border       = 7;          /* white border on power-on */
     vm->beeper       = 0;
     vm->fb_dirty     = true;       /* force first render */
@@ -27,14 +30,63 @@ void speccy_reset(speccy_t *vm) {
 }
 
 /* Hold each released key down for N frames so BASIC's IRQ-driven
- * keyboard scan sees it. 4 = ~80 ms — long enough for two frames of
- * "pressed" + a clean release in the third. Tweak if BASIC misses
- * keys (raise) or if double-presses bleed into auto-repeat (lower). */
-#define KEY_RELEASE_LATCH  4
+ * keyboard scan sees it. The 48K ROM's KEYBOARD-INPUT uses a debounce
+ * counter that starts at 5 and decrements every IRQ-frame the same
+ * key is held; only when it hits 0 does the press get dispatched. */
+#define KEY_RELEASE_LATCH  5
 
-/* Called once per frame from speccy_step_frame: tick down release
- * latches and clear the matrix bit when a latch hits zero. */
+/* After a key is fully released (latch hits 0), wait this many
+ * additional "all-up" frames before draining the next event from the
+ * HID queue. BASIC's KSTATE retains the previous key in its
+ * debounce/repeat tracking for several frames after release; if we
+ * dispatch the next press too soon BASIC treats the press as part of
+ * the previous keystroke's repeat sequence and refuses to dispatch
+ * it as a new keystroke. */
+#define KEY_RELEASE_GAP   3
+
+/* HID queue helpers. Encoding: bit 7 = action (0=DOWN, 1=UP),
+ * bits 6..3 = row (0..7), bits 2..0 = col (0..4). */
+#define HID_QSIZE  ((int)sizeof(((speccy_t*)0)->hid_queue))
+
+static inline uint8_t hid_pack(uint8_t row, uint8_t col, bool down) {
+    return (uint8_t)((down ? 0 : 0x80) | ((row & 7) << 3) | (col & 7));
+}
+static inline void hid_unpack(uint8_t v, uint8_t *row, uint8_t *col, bool *down) {
+    *down = (v & 0x80) == 0;
+    *row  = (v >> 3) & 7;
+    *col  = v & 7;
+}
+
+void speccy_kbd_enqueue(speccy_t *vm, uint8_t row, uint8_t col, bool pressed) {
+    uint8_t next = (uint8_t)((vm->hid_tail + 1) % HID_QSIZE);
+    if (next == vm->hid_head) return;   /* full — drop */
+    vm->hid_queue[vm->hid_tail] = hid_pack(row, col, pressed);
+    vm->hid_tail = next;
+}
+
+/* How many events are queued (used by debug.c to pace UART input
+ * expansion against the speccy core's drain rate). */
+uint8_t _speccy_hid_pending(speccy_t *vm) {
+    return (uint8_t)((vm->hid_tail - vm->hid_head + HID_QSIZE) % HID_QSIZE);
+}
+
+/* Called once per frame from speccy_step_frame: tick release latches,
+ * then drain at most one HID queue entry. The "one event per frame"
+ * pacing is what makes repeated taps of the same key register as
+ * distinct keystrokes — without it, an HID DOWN-UP-DOWN burst within
+ * a single frame would just look like "still pressed" to BASIC. */
 static void tick_release_latches(speccy_t *vm) {
+    /* Snapshot whether any key was mid-release at the START of this
+     * tick. If yes, we won't drain new events even after decrement —
+     * we want BASIC's KEY-SCAN to see at least one full frame of
+     * "all up" before the next press. Otherwise a DOWN drained in
+     * the same tick where the previous release latch hit 0 would
+     * make BASIC see continuous press across frames. */
+    bool any_latched_before = false;
+    for (int i = 0; i < 8 * 5; i++) {
+        if (vm->release_latch[i] > 0) { any_latched_before = true; break; }
+    }
+
     for (int row = 0; row < 8; row++) {
         for (int col = 0; col < 5; col++) {
             uint8_t *latch = &vm->release_latch[row * 5 + col];
@@ -44,6 +96,28 @@ static void tick_release_latches(speccy_t *vm) {
             }
         }
     }
+
+    /* If a release just completed in this tick, start a gap window:
+     * BASIC's KSTATE keeps the previous key alive for several frames
+     * after release. Dispatching the next press too quickly merges
+     * into the existing entry. */
+    if (any_latched_before) {
+        bool any_latched_now = false;
+        for (int i = 0; i < 8 * 5; i++) {
+            if (vm->release_latch[i] > 0) { any_latched_now = true; break; }
+        }
+        if (!any_latched_now) vm->gap_frames = KEY_RELEASE_GAP;
+        return;
+    }
+
+    if (vm->gap_frames > 0) { vm->gap_frames--; return; }
+    if (vm->hid_head == vm->hid_tail) return;
+
+    uint8_t row, col;
+    bool    pressed;
+    hid_unpack(vm->hid_queue[vm->hid_head], &row, &col, &pressed);
+    vm->hid_head = (uint8_t)((vm->hid_head + 1) % HID_QSIZE);
+    speccy_set_key(vm, row, col, pressed);
 }
 
 uint32_t speccy_step_frame(speccy_t *vm) {
@@ -102,7 +176,11 @@ void speccy_out(speccy_t *vm, uint16_t port, uint8_t value) {
 bool speccy_hid_event(speccy_t *vm, uint8_t usage, bool pressed) {
     uint8_t row, col;
     if (!keyboard_translate(usage, &row, &col)) return false;
-    speccy_set_key(vm, row, col, pressed);
+    /* Queue the event rather than applying it immediately. Drained
+     * one-per-frame (when no key is mid-release) by tick_release_latches.
+     * This paces fast HID bursts so each press → release transition is
+     * visible to BASIC's KEYBOARD-SCAN. */
+    speccy_kbd_enqueue(vm, row, col, pressed);
     return true;
 }
 

@@ -4,43 +4,28 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* BASIC's KEYBOARD-INPUT debounces by requiring the key to be
- *  - pressed for ≥2 IRQ-frames consistently
- *  - then RELEASED for ≥1 IRQ-frame before LAST_K is dispatched.
- *
- * If we never give BASIC a clean release between two chars (which
- * happens when the user types faster than KEY_HOLD_FRAMES), BASIC
- * keeps seeing "still pressed" and never reports anything.
- *
- * Solution: queue chars and inject them one at a time. Hold each
- * for KEY_HOLD_FRAMES, then a RELEASE_GRACE_FRAMES gap of all-keys-
- * up before the next press. */
-#define KEY_HOLD_FRAMES        6
-#define RELEASE_GRACE_FRAMES   2
-#define KEY_QUEUE_LEN          32
+/* UART input is enqueued char-by-char into the speccy HID queue,
+ * which paces delivery to the matrix one event per frame (with
+ * release latches between presses). Each typed char expands to
+ * 4 events for shifted symbols (SS DOWN, key DOWN, key UP, SS UP)
+ * or 2 events for plain keys (DOWN, UP). The speccy core handles
+ * the timing — debug.c just expands chars to events. */
 
-typedef struct { uint8_t row, col; uint8_t hold; bool active; } pending_t;
-static pending_t pending_main;     /* the typed letter / digit */
-static pending_t pending_shift;    /* CAPS or SYMBOL shift */
-static uint8_t   release_grace;    /* frames to wait after release */
-
-static char     key_queue[KEY_QUEUE_LEN];
+#define KEY_QUEUE_LEN  32
+static char     char_queue[KEY_QUEUE_LEN];
 static uint8_t  queue_head;
 static uint8_t  queue_tail;
 
 static void enqueue_char(char c) {
     uint8_t next = (uint8_t)((queue_tail + 1) % KEY_QUEUE_LEN);
-    if (next == queue_head) {
-        /* Full — drop. The user typed too fast even for the queue. */
-        return;
-    }
-    key_queue[queue_tail] = c;
+    if (next == queue_head) return;   /* full — drop */
+    char_queue[queue_tail] = c;
     queue_tail = next;
 }
 
 static int dequeue_char(void) {
     if (queue_head == queue_tail) return -1;
-    char c = key_queue[queue_head];
+    char c = char_queue[queue_head];
     queue_head = (uint8_t)((queue_head + 1) % KEY_QUEUE_LEN);
     return (int)(uint8_t)c;
 }
@@ -110,47 +95,46 @@ static const key_def_t ascii_table[128] = {
 
 void debug_init(speccy_t *vm) {
     (void)vm;
-    pending_main.active  = false;
-    pending_shift.active = false;
-    in_cmd               = false;
-    cmd_used             = 0;
-    periodic_pc          = false;
+    queue_head  = 0;
+    queue_tail  = 0;
+    in_cmd      = false;
+    cmd_used    = 0;
+    periodic_pc = false;
     uart_puts("debug: UART console up. Type chars to send keys; "
               "backtick (`) for commands. `h for help.\n");
 }
 
-/* Tick the hold counters; release when they reach zero. After
- * release, run a grace period during which no new key is pressed —
- * that gives BASIC's keyboard-scan a clean "all keys up" window
- * before the next press, so press→release transitions are visible. */
-static void tick_pending(speccy_t *vm) {
-    if (pending_main.active) {
-        if (--pending_main.hold == 0) {
-            speccy_set_key(vm, pending_main.row, pending_main.col, false);
-            pending_main.active = false;
-            release_grace = RELEASE_GRACE_FRAMES;
-        }
+/* Expand a typed char into a sequence of HID-style press/release
+ * events on the speccy queue. Plain keys: DOWN main, UP main.
+ * Shifted symbols: DOWN shift, DOWN main, UP main, UP shift. The
+ * speccy core's tick_release_latches drains these one per frame,
+ * with release-latch hold between events, so each char produces
+ * a distinct keystroke from BASIC's KEYBOARD-SCAN viewpoint. */
+static void inject_char_events(speccy_t *vm, char c) {
+    if ((uint8_t)c >= 128) return;
+    key_def_t k = ascii_table[(uint8_t)c];
+    if (k.row == 0 && k.col == 0 && k.cs == 0 && k.ss == 0 && c != 'a') {
+        uart_printf("debug: char '%c' (0x%x) unmapped\n",
+                    (uint64_t)c, (uint64_t)(uint8_t)c);
+        return;
     }
-    if (pending_shift.active) {
-        if (--pending_shift.hold == 0) {
-            speccy_set_key(vm, pending_shift.row, pending_shift.col, false);
-            pending_shift.active = false;
-        }
-    }
-    if (release_grace > 0) release_grace--;
-}
+    uart_printf("debug: enqueue '%c' → row=%u col=%u cs=%u ss=%u\n",
+                (uint64_t)c, (uint64_t)k.row, (uint64_t)k.col,
+                (uint64_t)k.cs, (uint64_t)k.ss);
 
-/* Force release (used before injecting a new key — we don't want a
- * second key press while the first is still held, that confuses the
- * Speccy keyboard scan). */
-static void release_pending(speccy_t *vm) {
-    if (pending_main.active) {
-        speccy_set_key(vm, pending_main.row, pending_main.col, false);
-        pending_main.active = false;
+    if (k.cs) {
+        speccy_kbd_enqueue(vm, 0, 0, true);
     }
-    if (pending_shift.active) {
-        speccy_set_key(vm, pending_shift.row, pending_shift.col, false);
-        pending_shift.active = false;
+    if (k.ss) {
+        speccy_kbd_enqueue(vm, 7, 1, true);
+    }
+    speccy_kbd_enqueue(vm, k.row, k.col, true);
+    speccy_kbd_enqueue(vm, k.row, k.col, false);
+    if (k.cs) {
+        speccy_kbd_enqueue(vm, 0, 0, false);
+    }
+    if (k.ss) {
+        speccy_kbd_enqueue(vm, 7, 1, false);
     }
 }
 
@@ -377,37 +361,9 @@ static void exec_command(speccy_t *vm, const char *cmd) {
     }
 }
 
-/* Caller has already verified pending_main is inactive and grace is
- * elapsed. Just press the key and start the hold counter. */
-static void inject_char(speccy_t *vm, char c) {
-    if ((uint8_t)c >= 128) return;
-    key_def_t k = ascii_table[(uint8_t)c];
-    if (k.row == 0 && k.col == 0 && k.cs == 0 && k.ss == 0 && c != 'a') {
-        uart_printf("debug: char '%c' (0x%x) unmapped\n",
-                    (uint64_t)c, (uint64_t)(uint8_t)c);
-        return;
-    }
-    uart_printf("debug: inject '%c' → row=%u col=%u cs=%u ss=%u\n",
-                (uint64_t)c, (uint64_t)k.row, (uint64_t)k.col,
-                (uint64_t)k.cs, (uint64_t)k.ss);
-
-    if (k.cs) {
-        speccy_set_key(vm, 0, 0, true);
-        pending_shift = (pending_t){0, 0, KEY_HOLD_FRAMES, true};
-    }
-    if (k.ss) {
-        speccy_set_key(vm, 7, 1, true);
-        pending_shift = (pending_t){7, 1, KEY_HOLD_FRAMES, true};
-    }
-    speccy_set_key(vm, k.row, k.col, true);
-    pending_main = (pending_t){k.row, k.col, KEY_HOLD_FRAMES, true};
-}
 
 void debug_poll(speccy_t *vm, uint32_t frame_count) {
-    /* Advance hold counters / release grace. */
-    tick_pending(vm);
-
-    /* Drain stdin into the queue (or the command buffer). */
+    /* Drain stdin into the char queue (or the command buffer). */
     int c;
     while ((c = uart_getc_nb()) >= 0) {
         if (in_cmd) {
@@ -429,11 +385,15 @@ void debug_poll(speccy_t *vm, uint32_t frame_count) {
         }
     }
 
-    /* If no key currently held and grace period elapsed, take the
-     * next char from the queue and inject it. */
-    if (!pending_main.active && release_grace == 0) {
+    /* Expand one char per frame from the typed-char queue into HID
+     * events on the speccy queue. The speccy core then drains those
+     * events with proper release-latch pacing. We rate-limit char
+     * expansion at "as fast as the speccy queue can absorb" — when
+     * there are still pending events in flight, we wait. */
+    extern uint8_t _speccy_hid_pending(speccy_t *vm);   /* declared below */
+    if (_speccy_hid_pending(vm) == 0) {
         int qc = dequeue_char();
-        if (qc >= 0) inject_char(vm, (char)qc);
+        if (qc >= 0) inject_char_events(vm, (char)qc);
     }
 
     /* Periodic PC dump: every 50 frames = 1 second. */

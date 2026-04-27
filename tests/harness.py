@@ -164,12 +164,14 @@ class Harness:
         Strips the local echo so the caller gets just the response body."""
         self._stdout_buf += self._read_some(timeout=0.05)  # drain stale
         self.write("`" + cmd + "\n")
-        # Each command's output ends right before the next "debug>" prompt
-        # OR before any further injected key/event. Read for a short
-        # window and return what came back.
         time.sleep(0.4)
         out = self._read_some(timeout=0.3)
         return out
+
+    def drain_uart(self) -> str:
+        """Return everything in the UART buffer right now — useful for
+        capturing trace output that's interleaved with keystrokes."""
+        return self._read_some(timeout=0.05)
 
     def screenshot(self) -> str:
         """Return the 24×32 ASCII visualisation of the screen."""

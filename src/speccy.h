@@ -47,6 +47,20 @@ typedef struct {
      * either the key is genuinely held OR the latch is non-zero. */
     uint8_t   release_latch[8 * 5];
 
+    /* HID event queue. Real HID DOWN/UP pairs from bochs come in
+     * faster than the Speccy's 50 Hz IRQ scan can resolve, so we
+     * queue them and drain at most one event per emulator frame.
+     * That gives BASIC's KEYBOARD-SCAN a clean transition for every
+     * keystroke instead of intra-frame DOWN+UP getting collapsed.
+     *
+     * Encoding: each entry is (event_type << 7) | (row << 3) | col,
+     * where event_type 0 = DOWN, 1 = UP. Capacity 64 is plenty for
+     * sustained burst typing. */
+    uint8_t   hid_queue[64];
+    uint8_t   hid_head;
+    uint8_t   hid_tail;
+    uint8_t   gap_frames;   /* frames of all-up to wait before draining next */
+
     /* Last write to port 0xFE: low 3 bits = border colour, bit 4 =
      * beeper level. Bit 3 (MIC) is ignored; bit 5 unused. */
     uint8_t   border;
@@ -80,12 +94,19 @@ uint32_t speccy_step_frame(speccy_t *vm);
 
 /* USB HID usage code → keyboard matrix translation (handled in
  * keyboard.c). Convenience entry point so main.c doesn't import the
- * full mapping table. Returns true if the key was a known Speccy
- * key, false if it was unmapped (caller can ignore). */
+ * full mapping table. Enqueues the event for paced delivery to the
+ * matrix. Returns true if the key was a known Speccy key, false if
+ * it was unmapped (caller can ignore). */
 bool speccy_hid_event(speccy_t *vm, uint8_t usage, bool pressed);
 
-/* Direct matrix poke — used by snapshot loaders or test fixtures. */
+/* Direct matrix poke — used by snapshot loaders or test fixtures.
+ * Bypasses the HID queue. */
 void speccy_set_key(speccy_t *vm, uint8_t row, uint8_t col, bool pressed);
+
+/* Enqueue an HID-style press/release for delivery on a future frame.
+ * Used by speccy_hid_event() and any other "paced" input sources.
+ * If the queue is full the event is dropped (and a warning logged). */
+void speccy_kbd_enqueue(speccy_t *vm, uint8_t row, uint8_t col, bool pressed);
 
 /* Implemented in speccy.c — exposed so z80user.h's macros can call
  * them without needing the full speccy_t internals visible to every

@@ -65,8 +65,16 @@ run-headless: firmware.bin
 	$(RVVM) firmware.bin -nogui -nonet -hda_test -nvme $(ROM)
 
 run-snap: firmware.bin
-	@test -n "$(SNAP)" || { echo "usage: make run-snap SNAP=path/to/foo.sna"; exit 1; }
-	$(RVVM) firmware.bin -bochs_display -nonet -hda_test -nvme $(ROM) -nvme $(SNAP)
+	@test -n "$(SNAP)" || { echo "usage: make run-snap SNAP=path/to/foo.{sna,z80}"; exit 1; }
+	@# RVVM's NVMe truncates each block device to a 512-byte boundary
+	@# (rvvm_blk_get_size >> 9, integer division). For .sna files (49179
+	@# bytes, 96.05 LBAs) and many .z80 files this loses the trailing
+	@# bytes — the snapshot then fails to parse. Pad to the next LBA
+	@# boundary in a sibling file so we don't mutate the original.
+	@padded=$$(mktemp -t snap.XXXXXX.bin); \
+	 dd if=$(SNAP) of=$$padded bs=512 conv=sync status=none && \
+	 $(RVVM) firmware.bin -bochs_display -nonet -hda_test -nvme $(ROM) -nvme $$padded; \
+	 rm -f $$padded
 
 clean:
 	rm -rf build firmware.elf firmware.bin

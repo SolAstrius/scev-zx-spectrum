@@ -57,12 +57,26 @@ into `build/z80emu.o` via the Makefile.
   our Speccy-aware version in `src/z80user.h`. The Makefile orders
   `-Isrc` before `-I$(Z80)` so ours is the one z80emu's hardcoded
   `#include "z80user.h"` resolves to.
-- **One patch to `z80emu.c`**: `IN`/`OUT` opcodes now expose the full
-  16-bit port via BC instead of the Z80 spec's 8-bit `A * 256 + n`.
-  The Speccy keyboard read uses A8–A15 as the row select, and
-  upstream z80emu drops those bits — so without this patch the matrix
-  read always sees "all rows pressed simultaneously" and BASIC eats
-  every keystroke. Commit `5b5ec60`.
+- **Patch to `z80emu.c`**: every `IN`/`OUT` opcode form now exposes the
+  full 16-bit port to `Z80_INPUT_BYTE`/`Z80_OUTPUT_BYTE` instead of just
+  the low byte. The real Z80 places A on bus bits 15:8 during `IN/OUT
+  (n),A` and places BC on the full bus during `IN/OUT r,(C)` and the
+  block I/O variants — stock z80emu drops the high half. Eight sites,
+  one logical change, all tagged `/* SCEV PATCH */`:
+
+  | Opcode | Old port | New port |
+  |---|---|---|
+  | `IN A,(n)` / `OUT (n),A`     | `n`  | `(A << 8) \| n` |
+  | `IN r,(C)` / `OUT (C),r`     | `C`  | `BC` |
+  | `INI` `IND` `INIR` `INDR`    | `C`  | `BC` |
+  | `OUTI` `OUTD` `OTIR` `OTDR`  | `C`  | `BC` |
+
+  Why it matters: the Speccy ULA decodes keyboard reads on A8–A15 as
+  the row-select mask (`speccy.c` does `row_select = ~(port >> 8)`).
+  Without the patch `port >> 8` is always zero, the firmware sees "every
+  row simultaneously selected", BASIC's KEYBOARD-SCAN gets garbage and
+  refuses to dispatch keystrokes — the emulator boots but is
+  functionally a brick. Commit `5b5ec60`.
 
 ### `src/rom_48k.h` — Sinclair 48K ROM
 

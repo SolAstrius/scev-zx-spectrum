@@ -104,21 +104,44 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
 
     /* Power-on Speccy + load ROM from -nvme controller 0.
      *
-     * The ROM (16 KiB) is required — it's Sinclair BASIC, the entry point
-     * the Z80 jumps to at reset. Provided as a separate disk rather than
-     * baked into firmware so users can swap in alternate ROMs (Gosh
-     * Wonderful, diagnostic ROMs, foreign-language variants) without
-     * rebuilding. */
-    speccy_reset(&vm);
+     * The ROM is required — it's the entry point the Z80 jumps to at
+     * reset. ROM size determines the boot mode:
+     *   16 KiB → 48K mode   (rom[0] = 48K BASIC; paging locked)
+     *   32 KiB → 128K mode  (rom[0] = 128K editor, rom[1] = 48K BASIC)
+     *
+     * Read 64 LBAs (32 KiB) into a staging buffer; use the disk's
+     * actual size to pick the mode. */
     static nvme_t  rom_disk;
-    static uint8_t rom_buf[16384] __attribute__((aligned(NVME_PAGE_SIZE)));
-    if (!nvme_init_nth(&rom_disk, 0)
-        || nvme_read(&rom_disk, 0, rom_buf, sizeof(rom_buf) / NVME_LBA_SIZE)
-            != sizeof(rom_buf) / NVME_LBA_SIZE) {
+    static uint8_t rom_buf[32768] __attribute__((aligned(NVME_PAGE_SIZE)));
+    if (!nvme_init_nth(&rom_disk, 0)) {
         uart_puts("FATAL: ROM disk not attached. Start RVVM with -nvme roms/48.rom\n");
         for (;;) __asm__ volatile ("wfi");
     }
-    memcpy(vm.mem, rom_buf, sizeof(rom_buf));
+    uint32_t rom_lbas = rom_disk.num_lbas;
+    if (rom_lbas > 64) rom_lbas = 64;
+    if (nvme_read(&rom_disk, 0, rom_buf, rom_lbas) != rom_lbas) {
+        uart_puts("FATAL: ROM disk read failed\n");
+        for (;;) __asm__ volatile ("wfi");
+    }
+    bool rom_is_128k = (rom_lbas == 64);   /* exactly 32 KiB */
+    if (rom_lbas != 32 && !rom_is_128k) {
+        uart_printf("FATAL: ROM disk is %u sectors, expected 32 (16 KiB) or 64 (32 KiB)\n",
+                    rom_lbas);
+        for (;;) __asm__ volatile ("wfi");
+    }
+
+    speccy_reset(&vm, rom_is_128k);
+    memcpy(vm.rom[0], rom_buf, 16384);
+    if (rom_is_128k) {
+        memcpy(vm.rom[1], rom_buf + 16384, 16384);
+        uart_puts("ROM: 128K (rom[0]=editor, rom[1]=48K BASIC)\n");
+    } else {
+        /* 48K mode: ROM 1 stays unused (paging is locked), but we
+         * mirror to rom[1] anyway so a stray rom_idx flip doesn't
+         * land on garbage. */
+        memcpy(vm.rom[1], rom_buf, 16384);
+        uart_puts("ROM: 48K\n");
+    }
 
     /* Optional snapshot from -nvme controller 1 (NVMe device added second
      * on the command line). 49 KiB buffer covers .sna + slack; page-aligned
@@ -140,7 +163,7 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
 
     debug_init(&vm);
 
-    uart_puts("Booting Sinclair BASIC...\n\n");
+    uart_printf("Booting %s...\n\n", rom_is_128k ? "128K editor" : "Sinclair BASIC");
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;
 

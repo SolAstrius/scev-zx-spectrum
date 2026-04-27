@@ -33,6 +33,21 @@ static inline void set_word(Z80_STATE *z, int pair_idx, uint16_t v) {
     z->registers.word[pair_idx] = v;
 }
 
+/* Helpers to write into the banked address space. The Z80 view
+ * 0x4000-0xFFFF maps to ram[5], ram[2], ram[ram_idx] (current). */
+static void poke_ram(speccy_t *vm, uint16_t addr, uint8_t v) {
+    if (addr < 0x4000) return;
+    else if (addr < 0x8000) vm->ram[5][addr - 0x4000] = v;
+    else if (addr < 0xC000) vm->ram[2][addr - 0x8000] = v;
+    else                    vm->ram[vm->ram_idx][addr - 0xC000] = v;
+}
+static uint8_t peek_ram(const speccy_t *vm, uint16_t addr) {
+    if (addr < 0x4000)       return 0;
+    else if (addr < 0x8000)  return vm->ram[5][addr - 0x4000];
+    else if (addr < 0xC000)  return vm->ram[2][addr - 0x8000];
+    else                     return vm->ram[vm->ram_idx][addr - 0xC000];
+}
+
 static bool load_sna(speccy_t *vm, const uint8_t *buf, uint32_t len) {
     if (len < 27 + 49152) return false;
 
@@ -76,14 +91,17 @@ static bool load_sna(speccy_t *vm, const uint8_t *buf, uint32_t len) {
     set_word(z, Z80_SP, (uint16_t)(buf[23] | (buf[24] << 8)));
     z->im   = buf[25] & 0x03;
 
-    /* RAM dump goes at 0x4000-0xFFFF. */
-    memcpy(&vm->mem[0x4000], &buf[27], 49152);
+    /* RAM dump goes at 0x4000-0xFFFF — split across banks 5, 2, and
+     * the current ram_idx (which is 0 by default after reset). */
+    for (uint32_t i = 0; i < 49152; i++) {
+        poke_ram(vm, (uint16_t)(0x4000 + i), buf[27 + i]);
+    }
 
     /* PC is on the stack — pop it. The .sna format stores the
      * snapshot's state as if it had just been interrupted, so PC
      * was pushed by the IRQ. */
     uint16_t sp = z->registers.word[Z80_SP];
-    uint16_t pc = (uint16_t)(vm->mem[sp] | (vm->mem[(uint16_t)(sp + 1)] << 8));
+    uint16_t pc = (uint16_t)(peek_ram(vm, sp) | (peek_ram(vm, (uint16_t)(sp + 1)) << 8));
     z->registers.word[Z80_SP] = (uint16_t)(sp + 2);
     z->pc = pc;
 
@@ -121,15 +139,15 @@ static bool decompress_z80(const uint8_t *src, uint32_t srclen,
     return o == dstlen;
 }
 
-/* Load 16 KiB into vm->mem[target..]. RVVM .z80 page blocks store
- * the data length explicitly; 0xFFFF means "16 KiB uncompressed". */
-static bool load_z80_page(speccy_t *vm, uint16_t target,
+/* Decompress / copy a 16 KiB page block into the named RAM bank. */
+static bool load_z80_page(speccy_t *vm, uint8_t bank,
                           const uint8_t *p, uint32_t blklen) {
+    if (bank >= SPECCY_NUM_RAM_BANKS) return false;
     if (blklen == 0xFFFF) {
-        memcpy(&vm->mem[target], p, 16384);
+        memcpy(vm->ram[bank], p, 16384);
         return true;
     }
-    return decompress_z80(p, blklen, &vm->mem[target], 16384);
+    return decompress_z80(p, blklen, vm->ram[bank], 16384);
 }
 
 static bool load_z80(speccy_t *vm, const uint8_t *buf, uint32_t len) {
@@ -173,18 +191,23 @@ static bool load_z80(speccy_t *vm, const uint8_t *buf, uint32_t len) {
 
     if (pc_v1 != 0) {
         /* v1: 49152 bytes of RAM (compressed or not) following the
-         * fixed 30-byte header. PC was already read from byte 6. */
+         * fixed 30-byte header. Split across banks 5 (0x4000-0x7FFF),
+         * 2 (0x8000-0xBFFF), and ram_idx (0xC000-0xFFFF, default 0). */
         const uint8_t *data = buf + 30;
         uint32_t rem = len - 30;
+        static uint8_t scratch[49152];   /* one-off staging buffer */
         if (compressed_v1) {
-            if (!decompress_z80(data, rem, &vm->mem[0x4000], 49152)) {
+            if (!decompress_z80(data, rem, scratch, 49152)) {
                 uart_puts("z80 v1: decompression underflow\n");
                 return false;
             }
         } else {
             if (rem < 49152) return false;
-            memcpy(&vm->mem[0x4000], data, 49152);
+            memcpy(scratch, data, 49152);
         }
+        memcpy(vm->ram[5],            &scratch[0],       16384);
+        memcpy(vm->ram[2],            &scratch[16384],   16384);
+        memcpy(vm->ram[vm->ram_idx],  &scratch[32768],   16384);
         z->pc = pc_v1;
         vm->fb_dirty = true;
         uart_printf("z80 v1: PC=%x SP=%x IM=%u border=%u %s\n",
@@ -204,22 +227,39 @@ static bool load_z80(speccy_t *vm, const uint8_t *buf, uint32_t len) {
     z->pc            = (uint16_t)(ext[0] | (ext[1] << 8));
     uint8_t hw_mode  = ext[2];
 
-    /* Hardware modes per the .z80 spec — for 48K snapshots only mode
-     * 0 or 1 (48K, optionally with Interface 1 ROM paged in) is
-     * meaningful. 128K modes need paged RAM and a different page
-     * mapping; reject loudly so the user knows. */
-    if (hw_mode != 0 && hw_mode != 1) {
-        uart_printf("z80 v%u: HW mode %u not 48K — refusing\n",
+    bool is_128k = (hw_mode == 3 || hw_mode == 4 || hw_mode == 5
+                  || hw_mode == 6 || hw_mode == 7 || hw_mode == 12 || hw_mode == 13);
+    bool is_48k  = (hw_mode == 0 || hw_mode == 1);
+
+    if (!is_48k && !is_128k) {
+        uart_printf("z80 v%u: HW mode %u unsupported\n",
                     (uint64_t)(ext_len == 23 ? 2 : 3), (uint64_t)hw_mode);
+        return false;
+    }
+    if (is_128k && !vm->mode_128k) {
+        uart_puts("z80: snapshot is 128K but firmware booted in 48K — load a 32 KiB ROM\n");
         return false;
     }
 
     /* Page blocks follow the extended header. Each: 2-byte length, 1-byte
-     * page number, then the data. In 48K mode pages map to:
-     *   page 4  → 0x8000-0xBFFF
-     *   page 5  → 0xC000-0xFFFF
-     *   page 8  → 0x4000-0x7FFF  (always at 0x4000)
-     * Other pages can appear in v3 saves (ROM, Multiface) — skip them. */
+     * page number, then the data. The mapping from .z80 page number to
+     * RAM bank index differs between 48K and 128K modes:
+     *
+     *   48K:    page 4 → bank 5 (logical 0x8000)  *not* the screen
+     *           page 5 → bank 2 (logical 0xC000)
+     *           page 8 → bank 0 (logical 0x4000)  the screen
+     *           Wait — that's wrong, let me restate:
+     *           In 48K terminology .z80 pages refer to the legacy
+     *           memory layout (page 4 = 0x8000, page 5 = 0xC000,
+     *           page 8 = 0x4000). Our RAM-bank model lives a layer
+     *           below: bank 5 = the screen at 0x4000, bank 2 always
+     *           at 0x8000, bank 0 = "the rest" at 0xC000.
+     *           So .z80 page 4 (0x8000-0xBFFF) → ram[2]
+     *              .z80 page 5 (0xC000-0xFFFF) → ram[0]
+     *              .z80 page 8 (0x4000-0x7FFF) → ram[5]
+     *
+     *   128K:   page N → ram[N - 3] for N in 3..10. So page 8 = ram[5]
+     *           (screen), page 5 = ram[2] (always-mapped), and so on. */
     uint32_t pos = 32 + ext_len;
     int pages_loaded = 0;
     while (pos + 3 <= len) {
@@ -230,15 +270,19 @@ static bool load_z80(speccy_t *vm, const uint8_t *buf, uint32_t len) {
         uint32_t consume = (blklen == 0xFFFF) ? 16384 : blklen;
         if (pos + consume > len) return false;
 
-        uint16_t target = 0xFFFF;
-        if (pageno == 4) target = 0x8000;
-        else if (pageno == 5) target = 0xC000;
-        else if (pageno == 8) target = 0x4000;
+        int bank = -1;
+        if (is_128k) {
+            if (pageno >= 3 && pageno <= 10) bank = pageno - 3;
+        } else {
+            if      (pageno == 4) bank = 2;
+            else if (pageno == 5) bank = 0;
+            else if (pageno == 8) bank = 5;
+        }
 
-        if (target != 0xFFFF) {
-            if (!load_z80_page(vm, target, &buf[pos], blklen)) {
-                uart_printf("z80: page %u (target=%x) decompress failed\n",
-                            (uint64_t)pageno, (uint64_t)target);
+        if (bank >= 0) {
+            if (!load_z80_page(vm, (uint8_t)bank, &buf[pos], blklen)) {
+                uart_printf("z80: page %u (bank %u) decompress failed\n",
+                            (uint64_t)pageno, (uint64_t)bank);
                 return false;
             }
             pages_loaded++;
@@ -246,12 +290,26 @@ static bool load_z80(speccy_t *vm, const uint8_t *buf, uint32_t len) {
         pos += consume;
     }
 
+    /* 128K paging state lives at ext[3] — the last byte written to
+     * port 0x7FFD before the snapshot. Apply it so the right RAM bank
+     * is at 0xC000 / right ROM at 0x0000 / right screen selected. */
+    if (is_128k && ext_len >= 4) {
+        uint8_t pg = ext[3];
+        vm->port_7ffd     = pg;
+        vm->ram_idx       = (uint8_t)(pg & SPECCY_7FFD_RAM_MASK);
+        vm->screen_idx    = (pg & SPECCY_7FFD_SCREEN) ? 7 : 5;
+        vm->rom_idx       = (pg & SPECCY_7FFD_ROM)    ? 1 : 0;
+        vm->paging_locked = (pg & SPECCY_7FFD_LOCK)   ? true : false;
+        speccy_apply_paging(vm);
+    }
+
     vm->fb_dirty = true;
-    uart_printf("z80 v%u: PC=%x SP=%x IM=%u border=%u, %d/3 48K pages\n",
+    uart_printf("z80 v%u: PC=%x SP=%x IM=%u border=%u %s, %d pages\n",
                 (uint64_t)(ext_len == 23 ? 2 : 3),
                 (uint64_t)z->pc, (uint64_t)z->registers.word[Z80_SP],
-                (uint64_t)z->im, (uint64_t)vm->border, pages_loaded);
-    return pages_loaded == 3;
+                (uint64_t)z->im, (uint64_t)vm->border,
+                is_128k ? "128K" : "48K", pages_loaded);
+    return pages_loaded > 0;
 }
 
 bool snapshot_load(speccy_t *vm, const uint8_t *buf, uint32_t len) {

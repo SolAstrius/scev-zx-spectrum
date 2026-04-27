@@ -183,12 +183,12 @@ static void dump_mem(const speccy_t *vm, uint32_t start) {
         uint32_t addr = (start + row * 16) & 0xFFFF;
         uart_printf("  %x: ", (uint64_t)addr);
         for (uint32_t i = 0; i < 16; i++) {
-            uint8_t b = vm->mem[(addr + i) & 0xFFFF];
+            uint8_t b = speccy_read8(vm, (addr + i) & 0xFFFF);
             uart_printf("%x ", (uint64_t)b);
         }
         uart_putc(' ');
         for (uint32_t i = 0; i < 16; i++) {
-            uint8_t b = vm->mem[(addr + i) & 0xFFFF];
+            uint8_t b = speccy_read8(vm, (addr + i) & 0xFFFF);
             uart_putc((b >= 0x20 && b < 0x7F) ? (char)b : '.');
         }
         uart_putc('\n');
@@ -214,7 +214,7 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                     periodic_pc ? "ON" : "OFF");
         break;
     case 'r':
-        speccy_reset(vm);
+        speccy_reset(vm, vm->mode_128k);
         uart_puts("debug: speccy core reset (ROM still in mem)\n");
         break;
     case 'i':
@@ -256,9 +256,9 @@ static void exec_command(speccy_t *vm, const char *cmd) {
             uart_printf("  row %s = %x\n", row_names[i], (uint64_t)vm->kbd[i]);
         }
         uart_printf("LAST_K=%x  REPDEL=%x  REPPER=%x  FLAGS=%x  ERR_NR=%x\n",
-                    (uint64_t)vm->mem[0x5C08], (uint64_t)vm->mem[0x5C09],
-                    (uint64_t)vm->mem[0x5C0A], (uint64_t)vm->mem[0x5C3B],
-                    (uint64_t)vm->mem[0x5C3A]);
+                    (uint64_t)speccy_read8(vm, 0x5C08), (uint64_t)speccy_read8(vm, 0x5C09),
+                    (uint64_t)speccy_read8(vm, 0x5C0A), (uint64_t)speccy_read8(vm, 0x5C3B),
+                    (uint64_t)speccy_read8(vm, 0x5C3A));
         break;
     }
     case 'v': {
@@ -287,7 +287,7 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                     uint32_t cr    = lit >> 3;
                     uint32_t lic2  = lit & 7;
                     uint32_t addr  = 0x4000 + (third << 11) + (lic2 << 8) + (cr << 5) + col;
-                    cell[lic] = vm->mem[addr];
+                    cell[lic] = speccy_read8(vm, addr);
                     if (cell[lic] != 0) empty = false;
                 }
                 if (empty) {
@@ -297,10 +297,12 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                 /* Compare against ASCII chars 0x20..0x7F at ROM[0x3D00 + (c-0x20)*8]. */
                 char found = '?';
                 for (int c = 0x20; c < 0x80; c++) {
-                    const uint8_t *gp = &vm->mem[0x3D00 + (c - 0x20) * 8];
+                    uint16_t gpb = (uint16_t)(0x3D00 + (c - 0x20) * 8);
                     bool match = true;
                     for (int i = 0; i < 8; i++) {
-                        if (cell[i] != gp[i]) { match = false; break; }
+                        if (cell[i] != speccy_read8(vm, (uint16_t)(gpb + i))) {
+                            match = false; break;
+                        }
                     }
                     if (match) { found = (char)c; break; }
                 }
@@ -327,21 +329,21 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                 uint32_t cr    = lit >> 3;
                 uint32_t lic   = lit & 7;
                 uint32_t addr  = 0x4000 + (third<<11) + (lic<<8) + (cr<<5) + (x_pix>>3);
-                uint8_t  bits  = vm->mem[addr];
+                uint8_t  bits  = speccy_read8(vm, addr);
                 /* Show only non-empty cells to highlight where text is. */
                 if (bits != 0 && bits != 0xFF) {
                     uart_printf("  r%u c%u: bits=%x  attr=%x\n",
                                 (uint64_t)row, (uint64_t)cx, (uint64_t)bits,
-                                (uint64_t)vm->mem[0x5800 + row*32 + cx]);
+                                (uint64_t)speccy_read8(vm, 0x5800 + row*32 + cx));
                 }
             }
         }
         /* And the cursor position from sysvars: K_CUR (DF-CCL) at 0x5C84
          * is the lower-screen edit cursor offset; print it. */
         uart_printf("DF_CC=%x  DF_CCL=%x  S_POSN=(%x,%x)\n",
-                    (uint64_t)(vm->mem[0x5C84] | (vm->mem[0x5C85] << 8)),
-                    (uint64_t)(vm->mem[0x5C86] | (vm->mem[0x5C87] << 8)),
-                    (uint64_t)vm->mem[0x5C88], (uint64_t)vm->mem[0x5C89]);
+                    (uint64_t)(speccy_read8(vm, 0x5C84) | (speccy_read8(vm, 0x5C85) << 8)),
+                    (uint64_t)(speccy_read8(vm, 0x5C86) | (speccy_read8(vm, 0x5C87) << 8)),
+                    (uint64_t)speccy_read8(vm, 0x5C88), (uint64_t)speccy_read8(vm, 0x5C89));
         break;
     }
     case 'h':

@@ -78,11 +78,18 @@ void speccy_render(speccy_t *vm, const gfx_t *g,
     uint32_t pic_x0 = x0 + bw;
     uint32_t pic_y0 = y0 + bw;
 
+    /* The active screen lives in vm->ram[5] (or ram[7] in 128K shadow
+     * mode). Either way it's exposed as page_4000 in 48K-compatible
+     * paging (bank 5 always at 0x4000), but the user could have switched
+     * to shadow display via port 0x7FFD bit 3 — read directly from
+     * ram[screen_idx] so we honour that without touching the live page. */
+    const uint8_t *scr = vm->ram[vm->screen_idx];
+
     for (uint32_t y = 0; y < SPECCY_SCREEN_H; y++) {
         for (uint32_t cx = 0; cx < 32; cx++) {       /* 32 columns of 8 px */
             uint32_t x_pix = cx * 8;
-            uint8_t  bits  = vm->mem[bitmap_addr(x_pix, y)];
-            uint8_t  attr  = vm->mem[attr_addr(x_pix, y)];
+            uint8_t  bits  = scr[bitmap_addr(x_pix, y) - 0x4000];
+            uint8_t  attr  = scr[attr_addr(x_pix, y) - 0x4000];
 
             uint32_t ink   = SPECCY_PALETTE[(attr & 0x07) | ((attr & 0x40) >> 3)];
             uint32_t paper = SPECCY_PALETTE[((attr >> 3) & 0x07) | ((attr & 0x40) >> 3)];

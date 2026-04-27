@@ -12,8 +12,29 @@ void *memset(void *dst, int c, unsigned long n);
  * IRQ vector dominating PC samples. */
 bool _debug_irq_disabled = false;
 
-void speccy_reset(speccy_t *vm) {
-    memset(vm->mem, 0, sizeof(vm->mem));
+void speccy_apply_paging(speccy_t *vm) {
+    if (vm->rom_idx >= SPECCY_NUM_ROM_BANKS) vm->rom_idx = 0;
+    if (vm->ram_idx >= SPECCY_NUM_RAM_BANKS) vm->ram_idx = 0;
+    vm->page_0000 = vm->rom[vm->rom_idx];
+    vm->page_4000 = vm->ram[5];   /* always */
+    vm->page_8000 = vm->ram[2];   /* always */
+    vm->page_C000 = vm->ram[vm->ram_idx];
+}
+
+void speccy_reset(speccy_t *vm, bool is_128k) {
+    /* Zero RAM but DON'T zero ROM — the firmware loads it before reset. */
+    memset(vm->ram, 0, sizeof(vm->ram));
+
+    vm->mode_128k      = is_128k;
+    vm->t_per_frame    = is_128k ? SPECCY_T_PER_FRAME_128K
+                                 : SPECCY_T_PER_FRAME_48K;
+    vm->rom_idx        = 0;       /* 128K editor on 128K, 48K BASIC on 48K */
+    vm->ram_idx        = 0;
+    vm->screen_idx     = 5;       /* normal screen */
+    vm->paging_locked  = !is_128k;   /* 48K mode = paging locked from boot */
+    vm->port_7ffd      = 0;
+    speccy_apply_paging(vm);
+
     /* All keys up — the matrix is active-low. Bits 5..7 stay set
      * because the ULA only owns bits 0..4. */
     for (int i = 0; i < 8; i++) vm->kbd[i] = 0xFF;
@@ -174,7 +195,7 @@ uint32_t speccy_step_frame(speccy_t *vm) {
      * 0xFF on the bus and the ROM uses IM 1 by default, so 0xFF is
      * the correct payload either way. */
     uint32_t executed = (uint32_t)Z80Emulate(&vm->z80,
-                                             SPECCY_T_PER_FRAME,
+                                             vm->t_per_frame,
                                              vm);
     /* Snapshot PC for diagnostics — right after Z80Emulate, before
      * Z80Interrupt potentially clobbers it with 0x0038. */
@@ -209,9 +230,30 @@ uint8_t speccy_in(speccy_t *vm, uint16_t port) {
 }
 
 void speccy_out(speccy_t *vm, uint16_t port, uint8_t value) {
+    /* ULA — any port with bit 0 = 0. */
     if ((port & 1) == 0) {
         vm->border = (uint8_t)(value & 0x07);
         vm->beeper = (uint8_t)((value >> 4) & 1);
+        return;
+    }
+
+    /* 128K paging port 0x7FFD. Decode is "A15=0 AND A1=0" so any port
+     * matching `xxxxxxxx-x---x-0` selects it; the canonical address is
+     * 0x7FFD. We accept the canonical form plus the most common mirror
+     * 0x1FFD (which is actually +3's 2nd paging port — see spec) by
+     * matching A15=0 + A1=0 strictly. Once vm->paging_locked, writes
+     * are silently dropped (per the lock bit's meaning). */
+    if (vm->mode_128k && !vm->paging_locked
+        && (port & 0x8002) == 0) {
+        vm->port_7ffd     = value;
+        vm->ram_idx       = (uint8_t)(value & SPECCY_7FFD_RAM_MASK);
+        vm->screen_idx    = (value & SPECCY_7FFD_SCREEN) ? 7 : 5;
+        vm->rom_idx       = (value & SPECCY_7FFD_ROM)    ? 1 : 0;
+        if (value & SPECCY_7FFD_LOCK) vm->paging_locked = true;
+        speccy_apply_paging(vm);
+        /* Screen-bank toggle changes what the renderer should display
+         * even if no RAM byte changed; force a redraw. */
+        vm->fb_dirty = true;
     }
 }
 

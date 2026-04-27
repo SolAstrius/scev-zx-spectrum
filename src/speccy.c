@@ -5,7 +5,7 @@
 void *memset(void *dst, int c, unsigned long n);
 
 /* Defined in keyboard.c. */
-extern bool keyboard_translate(uint8_t usage, uint8_t *out_row, uint8_t *out_col);
+#include "keyboard.h"
 
 /* Tweakable from debug.c — when true, speccy_step_frame skips the
  * Z80Interrupt call so we can observe the Z80 main loop without the
@@ -104,24 +104,14 @@ static void tick_release_latches(speccy_t *vm) {
      * suppression); pressing a different key can drain immediately. */
     if (any_latched_before) {
         bool any_latched_now = false;
-        int  released_idx = -1;
         for (int i = 0; i < 8 * 5; i++) {
-            if (vm->release_latch[i] > 0) any_latched_now = true;
-            /* "Just released this tick" — bit was cleared until this
-             * tick's decrement set it. Approximation: check the bit
-             * is now set on a key whose latch is 0 and was 1 going in. */
+            if (vm->release_latch[i] > 0) { any_latched_now = true; break; }
         }
         if (!any_latched_now) {
+            /* All keys just went up. Start the gap window — the
+             * SAME key being re-pressed within KEY_RELEASE_GAP frames
+             * waits; different keys drain immediately. */
             vm->gap_frames = KEY_RELEASE_GAP;
-            /* Re-find which key was just released to remember its
-             * (row, col) for same-key gap matching. We track this
-             * by setting the packed location of the most recent
-             * release, which is the row/col of the UP event drained
-             * a few ticks ago. We could plumb that through, but
-             * simpler: reset to "any" — gap applies to any same-key
-             * press, but we don't know which yet. Setting 0xFF here
-             * means "gap applies to whatever the previous head event
-             * was"; updated below. */
         }
         return;
     }
@@ -225,14 +215,79 @@ void speccy_out(speccy_t *vm, uint16_t port, uint8_t value) {
     }
 }
 
+/* Host modifier state. Tracked across speccy_hid_event invocations so
+ * we can pick the right chord for shifted keys. We DON'T emit a CAPS-
+ * SHIFT press for the host's LSHIFT/RSHIFT directly — instead, the
+ * chord lookup does it per-key (so SHIFT+digit gives "!@#" via
+ * SYMBOL_SHIFT, while SHIFT+letter gives 'A' via CAPS_SHIFT). */
+static struct {
+    bool shift;   /* LSHIFT or RSHIFT */
+    bool ctrl;    /* LCTRL  or RCTRL  → SYMBOL SHIFT alias */
+    bool alt;     /* LALT   or RALT   → SYMBOL SHIFT alias */
+} host_mods;
+
+/* Per-HID-usage record of which Speccy chord we emitted on DOWN.
+ * Used so that the matching UP releases EXACTLY the same chord —
+ * even if host shift state changed in between. */
+static struct {
+    kbd_chord_t chord;
+    uint8_t     active;
+} active_keys[0x100];
+
+static void enqueue_chord(speccy_t *vm, kbd_chord_t c, bool pressed) {
+    if (pressed) {
+        if (c.shift == KBD_CAPS_SHIFT)
+            speccy_kbd_enqueue(vm, 0, 0, true);
+        else if (c.shift == KBD_SYMBOL_SHIFT)
+            speccy_kbd_enqueue(vm, 7, 1, true);
+        speccy_kbd_enqueue(vm, c.row, c.col, true);
+    } else {
+        speccy_kbd_enqueue(vm, c.row, c.col, false);
+        if (c.shift == KBD_CAPS_SHIFT)
+            speccy_kbd_enqueue(vm, 0, 0, false);
+        else if (c.shift == KBD_SYMBOL_SHIFT)
+            speccy_kbd_enqueue(vm, 7, 1, false);
+    }
+}
+
 bool speccy_hid_event(speccy_t *vm, uint8_t usage, bool pressed) {
-    uint8_t row, col;
-    if (!keyboard_translate(usage, &row, &col)) return false;
-    /* Queue the event rather than applying it immediately. Drained
-     * one-per-frame (when no key is mid-release) by tick_release_latches.
-     * This paces fast HID bursts so each press → release transition is
-     * visible to BASIC's KEYBOARD-SCAN. */
-    speccy_kbd_enqueue(vm, row, col, pressed);
+    /* Modifier keys: track state, don't emit a Speccy press for the
+     * modifier itself. The chord lookup adds the appropriate Speccy
+     * shift per-key.
+     *
+     * Exception: LCTRL/RCTRL (and LALT/RALT) get aliased to SYMBOL
+     * SHIFT directly — useful for users who want manual access to
+     * Speccy's SS+key combos (entering BASIC tokens etc). */
+    switch (usage) {
+    case 0xE1: case 0xE5:   /* L/R SHIFT */
+        host_mods.shift = pressed;
+        return true;
+    case 0xE0: case 0xE4:   /* L/R CTRL → SYMBOL SHIFT */
+        host_mods.ctrl = pressed;
+        speccy_kbd_enqueue(vm, 7, 1, pressed);
+        return true;
+    case 0xE2: case 0xE6:   /* L/R ALT → SYMBOL SHIFT alias */
+        host_mods.alt = pressed;
+        speccy_kbd_enqueue(vm, 7, 1, pressed);
+        return true;
+    case 0xE3: case 0xE7:   /* L/R META — unmapped on Speccy */
+        return false;
+    }
+
+    if (pressed) {
+        kbd_chord_t c;
+        if (!keyboard_translate(usage, host_mods.shift, &c)) return false;
+        active_keys[usage].chord  = c;
+        active_keys[usage].active = 1;
+        enqueue_chord(vm, c, true);
+    } else {
+        /* Use the chord we ACTUALLY emitted on DOWN — host shift
+         * may have changed in the meantime. */
+        if (!active_keys[usage].active) return false;
+        kbd_chord_t c = active_keys[usage].chord;
+        active_keys[usage].active = 0;
+        enqueue_chord(vm, c, false);
+    }
     return true;
 }
 

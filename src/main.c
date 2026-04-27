@@ -49,18 +49,9 @@ static void on_key(uint8_t usage, bool pressed, void *ctx) {
      * isn't echoing in BASIC, the first question is "did the keypress
      * even reach the firmware?" so we log it unconditionally. */
     bool mapped = speccy_hid_event(&vm, usage, pressed);
-    if (mapped) {
-        /* Look up where it landed in the matrix to make this useful. */
-        extern bool keyboard_translate(uint8_t u, uint8_t *r, uint8_t *c);
-        uint8_t r = 0, c = 0;
-        keyboard_translate(usage, &r, &c);
-        uart_printf("hid: usage=0x%x %s → kbd[%u] col=%u\n",
-                    (uint64_t)usage, pressed ? "DOWN" : "up  ",
-                    (uint64_t)r, (uint64_t)c);
-    } else {
-        uart_printf("hid: usage=0x%x %s (UNMAPPED)\n",
-                    (uint64_t)usage, pressed ? "DOWN" : "up  ");
-    }
+    uart_printf("hid: usage=0x%x %s%s\n",
+                (uint64_t)usage, pressed ? "DOWN" : "up  ",
+                mapped ? "" : " (UNMAPPED)");
 }
 
 static uintptr_t fdt_addr_of(const fdt_t *fdt, const char *compat,

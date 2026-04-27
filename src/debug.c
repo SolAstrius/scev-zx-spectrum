@@ -5,10 +5,15 @@
 #include <stdbool.h>
 
 /* Pending key auto-release: when we set a key bit via UART input we
- * record it here and clear the bit on the next frame. That's how
- * one-shot terminal characters get "typed" without our needing real
- * key-up events. */
-typedef struct { uint8_t row, col; bool active; } pending_t;
+ * record it here and decrement a frame counter. The key is held for
+ * KEY_HOLD_FRAMES so BASIC's keyboard-scan debounce (~2 frames)
+ * actually sees the press. Released when the counter hits zero.
+ *
+ * Held too short: BASIC misses the keystroke. Held too long: BASIC
+ * auto-repeats. 6 frames is the sweet spot for the 48K ROM —
+ * REPDEL is 35 frames so we won't trip the repeat path. */
+#define KEY_HOLD_FRAMES   6
+typedef struct { uint8_t row, col; uint8_t hold; bool active; } pending_t;
 static pending_t pending_main;     /* the typed letter / digit */
 static pending_t pending_shift;    /* CAPS or SYMBOL shift */
 
@@ -86,6 +91,25 @@ void debug_init(speccy_t *vm) {
               "backtick (`) for commands. `h for help.\n");
 }
 
+/* Tick the hold counters; release when they reach zero. */
+static void tick_pending(speccy_t *vm) {
+    if (pending_main.active) {
+        if (--pending_main.hold == 0) {
+            speccy_set_key(vm, pending_main.row, pending_main.col, false);
+            pending_main.active = false;
+        }
+    }
+    if (pending_shift.active) {
+        if (--pending_shift.hold == 0) {
+            speccy_set_key(vm, pending_shift.row, pending_shift.col, false);
+            pending_shift.active = false;
+        }
+    }
+}
+
+/* Force release (used before injecting a new key — we don't want a
+ * second key press while the first is still held, that confuses the
+ * Speccy keyboard scan). */
 static void release_pending(speccy_t *vm) {
     if (pending_main.active) {
         speccy_set_key(vm, pending_main.row, pending_main.col, false);
@@ -249,26 +273,31 @@ static void inject_char(speccy_t *vm, char c) {
     key_def_t k = ascii_table[(uint8_t)c];
     if (k.row == 0 && k.col == 0 && k.cs == 0 && k.ss == 0 && c != 'a') {
         /* All zeros for non-'a' = unmapped (table default-init). */
+        uart_printf("debug: char '%c' (0x%x) unmapped\n",
+                    (uint64_t)c, (uint64_t)(uint8_t)c);
         return;
     }
+    uart_printf("debug: inject '%c' → row=%u col=%u cs=%u ss=%u\n",
+                (uint64_t)c, (uint64_t)k.row, (uint64_t)k.col,
+                (uint64_t)k.cs, (uint64_t)k.ss);
 
     if (k.cs) {
         speccy_set_key(vm, 0, 0, true);
-        pending_shift = (pending_t){0, 0, true};
+        pending_shift = (pending_t){0, 0, KEY_HOLD_FRAMES, true};
     }
     if (k.ss) {
         speccy_set_key(vm, 7, 1, true);
-        pending_shift = (pending_t){7, 1, true};
+        pending_shift = (pending_t){7, 1, KEY_HOLD_FRAMES, true};
     }
     speccy_set_key(vm, k.row, k.col, true);
-    pending_main = (pending_t){k.row, k.col, true};
+    pending_main = (pending_t){k.row, k.col, KEY_HOLD_FRAMES, true};
 }
 
 void debug_poll(speccy_t *vm, uint32_t frame_count) {
-    /* Auto-release the previous frame's typed key before processing
-     * new input — gives the Speccy ROM ~1 frame of "key pressed"
-     * which is enough for IRQ-driven scan to register it. */
-    release_pending(vm);
+    /* Tick the hold counter on any in-flight key. When it hits zero
+     * the key is released. Held for KEY_HOLD_FRAMES (3) so BASIC's
+     * keyboard-scan debounce sees the press. */
+    tick_pending(vm);
 
     int c;
     while ((c = uart_getc_nb()) >= 0) {

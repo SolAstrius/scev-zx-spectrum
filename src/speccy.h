@@ -59,7 +59,8 @@ typedef struct {
     uint8_t   hid_queue[64];
     uint8_t   hid_head;
     uint8_t   hid_tail;
-    uint8_t   gap_frames;   /* frames of all-up to wait before draining next */
+    uint8_t   gap_frames;   /* frames of all-up to wait before next same-key press */
+    uint8_t   last_released_packed;  /* (row<<3)|col; 0xFF = none */
 
     /* Last write to port 0xFE: low 3 bits = border colour, bit 4 =
      * beeper level. Bit 3 (MIC) is ignored; bit 5 unused. */

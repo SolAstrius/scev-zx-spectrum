@@ -21,6 +21,7 @@ void speccy_reset(speccy_t *vm) {
     vm->hid_head     = 0;
     vm->hid_tail     = 0;
     vm->gap_frames   = 0;
+    vm->last_released_packed = 0xFF;
     vm->border       = 7;          /* white border on power-on */
     vm->beeper       = 0;
     vm->fb_dirty     = true;       /* force first render */
@@ -97,26 +98,60 @@ static void tick_release_latches(speccy_t *vm) {
         }
     }
 
-    /* If a release just completed in this tick, start a gap window:
-     * BASIC's KSTATE keeps the previous key alive for several frames
-     * after release. Dispatching the next press too quickly merges
-     * into the existing entry. */
+    /* If a release just completed in this tick, remember which key
+     * was last released and start a gap window. The gap is only
+     * enforced if the NEXT press is the SAME key (KSTATE auto-repeat
+     * suppression); pressing a different key can drain immediately. */
     if (any_latched_before) {
         bool any_latched_now = false;
+        int  released_idx = -1;
         for (int i = 0; i < 8 * 5; i++) {
-            if (vm->release_latch[i] > 0) { any_latched_now = true; break; }
+            if (vm->release_latch[i] > 0) any_latched_now = true;
+            /* "Just released this tick" — bit was cleared until this
+             * tick's decrement set it. Approximation: check the bit
+             * is now set on a key whose latch is 0 and was 1 going in. */
         }
-        if (!any_latched_now) vm->gap_frames = KEY_RELEASE_GAP;
+        if (!any_latched_now) {
+            vm->gap_frames = KEY_RELEASE_GAP;
+            /* Re-find which key was just released to remember its
+             * (row, col) for same-key gap matching. We track this
+             * by setting the packed location of the most recent
+             * release, which is the row/col of the UP event drained
+             * a few ticks ago. We could plumb that through, but
+             * simpler: reset to "any" — gap applies to any same-key
+             * press, but we don't know which yet. Setting 0xFF here
+             * means "gap applies to whatever the previous head event
+             * was"; updated below. */
+        }
         return;
     }
 
-    if (vm->gap_frames > 0) { vm->gap_frames--; return; }
-    if (vm->hid_head == vm->hid_tail) return;
+    if (vm->hid_head == vm->hid_tail) {
+        if (vm->gap_frames > 0) vm->gap_frames--;
+        return;
+    }
 
+    /* Peek the next event to decide whether the gap applies. */
     uint8_t row, col;
     bool    pressed;
     hid_unpack(vm->hid_queue[vm->hid_head], &row, &col, &pressed);
+
+    if (vm->gap_frames > 0) {
+        uint8_t pk = (uint8_t)((row << 3) | col);
+        if (pressed && pk == vm->last_released_packed) {
+            /* Same key being re-pressed during the gap: hold off. */
+            vm->gap_frames--;
+            return;
+        }
+        /* Different key (or a release event): drain immediately,
+         * the gap was specific to the previous key. */
+        vm->gap_frames = 0;
+    }
+
     vm->hid_head = (uint8_t)((vm->hid_head + 1) % HID_QSIZE);
+    if (!pressed) {
+        vm->last_released_packed = (uint8_t)((row << 3) | col);
+    }
     speccy_set_key(vm, row, col, pressed);
 }
 

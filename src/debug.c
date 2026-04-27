@@ -4,18 +4,46 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Pending key auto-release: when we set a key bit via UART input we
- * record it here and decrement a frame counter. The key is held for
- * KEY_HOLD_FRAMES so BASIC's keyboard-scan debounce (~2 frames)
- * actually sees the press. Released when the counter hits zero.
+/* BASIC's KEYBOARD-INPUT debounces by requiring the key to be
+ *  - pressed for ≥2 IRQ-frames consistently
+ *  - then RELEASED for ≥1 IRQ-frame before LAST_K is dispatched.
  *
- * Held too short: BASIC misses the keystroke. Held too long: BASIC
- * auto-repeats. 6 frames is the sweet spot for the 48K ROM —
- * REPDEL is 35 frames so we won't trip the repeat path. */
-#define KEY_HOLD_FRAMES   6
+ * If we never give BASIC a clean release between two chars (which
+ * happens when the user types faster than KEY_HOLD_FRAMES), BASIC
+ * keeps seeing "still pressed" and never reports anything.
+ *
+ * Solution: queue chars and inject them one at a time. Hold each
+ * for KEY_HOLD_FRAMES, then a RELEASE_GRACE_FRAMES gap of all-keys-
+ * up before the next press. */
+#define KEY_HOLD_FRAMES        6
+#define RELEASE_GRACE_FRAMES   2
+#define KEY_QUEUE_LEN          32
+
 typedef struct { uint8_t row, col; uint8_t hold; bool active; } pending_t;
 static pending_t pending_main;     /* the typed letter / digit */
 static pending_t pending_shift;    /* CAPS or SYMBOL shift */
+static uint8_t   release_grace;    /* frames to wait after release */
+
+static char     key_queue[KEY_QUEUE_LEN];
+static uint8_t  queue_head;
+static uint8_t  queue_tail;
+
+static void enqueue_char(char c) {
+    uint8_t next = (uint8_t)((queue_tail + 1) % KEY_QUEUE_LEN);
+    if (next == queue_head) {
+        /* Full — drop. The user typed too fast even for the queue. */
+        return;
+    }
+    key_queue[queue_tail] = c;
+    queue_tail = next;
+}
+
+static int dequeue_char(void) {
+    if (queue_head == queue_tail) return -1;
+    char c = key_queue[queue_head];
+    queue_head = (uint8_t)((queue_head + 1) % KEY_QUEUE_LEN);
+    return (int)(uint8_t)c;
+}
 
 /* Mode flags. */
 static bool periodic_pc = false;
@@ -91,12 +119,16 @@ void debug_init(speccy_t *vm) {
               "backtick (`) for commands. `h for help.\n");
 }
 
-/* Tick the hold counters; release when they reach zero. */
+/* Tick the hold counters; release when they reach zero. After
+ * release, run a grace period during which no new key is pressed —
+ * that gives BASIC's keyboard-scan a clean "all keys up" window
+ * before the next press, so press→release transitions are visible. */
 static void tick_pending(speccy_t *vm) {
     if (pending_main.active) {
         if (--pending_main.hold == 0) {
             speccy_set_key(vm, pending_main.row, pending_main.col, false);
             pending_main.active = false;
+            release_grace = RELEASE_GRACE_FRAMES;
         }
     }
     if (pending_shift.active) {
@@ -105,6 +137,7 @@ static void tick_pending(speccy_t *vm) {
             pending_shift.active = false;
         }
     }
+    if (release_grace > 0) release_grace--;
 }
 
 /* Force release (used before injecting a new key — we don't want a
@@ -219,6 +252,31 @@ static void exec_command(speccy_t *vm, const char *cmd) {
         }
         break;
     }
+    case 'k': {
+        /* Dump the keyboard matrix and a few keyboard-related sysvars
+         * so we can see what BASIC's KEYBOARD-SCAN is actually working
+         * against. kbd[N] = 0xFF means all keys in row N released; any
+         * cleared bit is a held key in that column. */
+        uart_puts("keyboard matrix (0xFF = all up):\n");
+        static const char *row_names[8] = {
+            "0  CS-Z-X-C-V",
+            "1  A-S-D-F-G ",
+            "2  Q-W-E-R-T ",
+            "3  1-2-3-4-5 ",
+            "4  0-9-8-7-6 ",
+            "5  P-O-I-U-Y ",
+            "6  EN-L-K-J-H",
+            "7  SP-SS-M-N-B",
+        };
+        for (int i = 0; i < 8; i++) {
+            uart_printf("  row %s = %x\n", row_names[i], (uint64_t)vm->kbd[i]);
+        }
+        uart_printf("LAST_K=%x  REPDEL=%x  REPPER=%x  FLAGS=%x  ERR_NR=%x\n",
+                    (uint64_t)vm->mem[0x5C08], (uint64_t)vm->mem[0x5C09],
+                    (uint64_t)vm->mem[0x5C0A], (uint64_t)vm->mem[0x5C3B],
+                    (uint64_t)vm->mem[0x5C3A]);
+        break;
+    }
     case 's': {
         /* Snapshot of the bottom 2 rows of screen RAM (the BASIC
          * edit area) + their attributes. The K cursor lives here. */
@@ -258,6 +316,7 @@ static void exec_command(speccy_t *vm, const char *cmd) {
                   "  p         toggle periodic PC dump (every 1 s)\n"
                   "  i         toggle Z80Interrupt injection\n"
                   "  t         single-shot 16-step PC trace\n"
+                  "  k         dump keyboard matrix + LAST_K/FLAGS sysvars\n"
                   "  s         snapshot bottom-of-screen text + cursor pos\n"
                   "  r         reset Z80 core\n"
                   "  h         this help\n");
@@ -265,14 +324,12 @@ static void exec_command(speccy_t *vm, const char *cmd) {
     }
 }
 
+/* Caller has already verified pending_main is inactive and grace is
+ * elapsed. Just press the key and start the hold counter. */
 static void inject_char(speccy_t *vm, char c) {
-    /* Release any prior pending key first. */
-    release_pending(vm);
-
     if ((uint8_t)c >= 128) return;
     key_def_t k = ascii_table[(uint8_t)c];
     if (k.row == 0 && k.col == 0 && k.cs == 0 && k.ss == 0 && c != 'a') {
-        /* All zeros for non-'a' = unmapped (table default-init). */
         uart_printf("debug: char '%c' (0x%x) unmapped\n",
                     (uint64_t)c, (uint64_t)(uint8_t)c);
         return;
@@ -294,11 +351,10 @@ static void inject_char(speccy_t *vm, char c) {
 }
 
 void debug_poll(speccy_t *vm, uint32_t frame_count) {
-    /* Tick the hold counter on any in-flight key. When it hits zero
-     * the key is released. Held for KEY_HOLD_FRAMES (3) so BASIC's
-     * keyboard-scan debounce sees the press. */
+    /* Advance hold counters / release grace. */
     tick_pending(vm);
 
+    /* Drain stdin into the queue (or the command buffer). */
     int c;
     while ((c = uart_getc_nb()) >= 0) {
         if (in_cmd) {
@@ -316,8 +372,15 @@ void debug_poll(speccy_t *vm, uint32_t frame_count) {
             cmd_used = 0;
             uart_puts("\ndebug> ");
         } else {
-            inject_char(vm, (char)c);
+            enqueue_char((char)c);
         }
+    }
+
+    /* If no key currently held and grace period elapsed, take the
+     * next char from the queue and inject it. */
+    if (!pending_main.active && release_grace == 0) {
+        int qc = dequeue_char();
+        if (qc >= 0) inject_char(vm, (char)qc);
     }
 
     /* Periodic PC dump: every 50 frames = 1 second. */

@@ -26,6 +26,7 @@
 #include "speccy.h"
 #include "render.h"
 #include "snapshot.h"
+#include "debug.h"
 #include "rom_48k.h"
 
 #include <stddef.h>
@@ -118,6 +119,8 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         }
     }
 
+    debug_init(&vm);
+
     uart_puts("Booting Sinclair BASIC...\n\n");
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;
@@ -125,6 +128,7 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     uint64_t deadline = time_now() + RVVM_TICKS_PER_FRAME;
     for (;;) {
         hid_kb_poll(&kb, on_key, NULL);
+        debug_poll(&vm, (uint32_t)vm.frame_count);
         speccy_step_frame(&vm);
         if (have_gfx) {
             speccy_render(&vm, &g, x_off, y_off, DISPLAY_SCALE);

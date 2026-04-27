@@ -48,6 +48,13 @@ typedef struct {
     bool      fb_dirty;
 
     uint64_t  frame_count;
+
+    /* Snapshot of Z80 PC right BEFORE the per-frame Z80Interrupt call.
+     * After step_frame returns, z80.pc is always 0x0038 (the IM 1
+     * vector); this field records where the Z80 actually was at
+     * frame-end. Useful to tell whether the main loop is making
+     * progress or whether everything is stuck inside the IRQ handler. */
+    uint16_t  pre_irq_pc;
 } speccy_t;
 
 /* Power-on reset: clears RAM, sets Z80 to known state, fills callbacks

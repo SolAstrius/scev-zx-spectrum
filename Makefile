@@ -30,7 +30,7 @@ LDFLAGS  := -nostdlib -static -Wl,-T,$(HAL)/link.ld
 
 # Speccy core objects.
 OBJS     := build/main.o build/speccy.o build/render.o build/keyboard.o \
-            build/snapshot.o build/z80emu.o
+            build/snapshot.o build/debug.o build/z80emu.o
 
 all: firmware.bin
 

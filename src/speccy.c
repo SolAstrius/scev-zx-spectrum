@@ -7,6 +7,11 @@ void *memset(void *dst, int c, unsigned long n);
 /* Defined in keyboard.c. */
 extern bool keyboard_translate(uint8_t usage, uint8_t *out_row, uint8_t *out_col);
 
+/* Tweakable from debug.c — when true, speccy_step_frame skips the
+ * Z80Interrupt call so we can observe the Z80 main loop without the
+ * IRQ vector dominating PC samples. */
+bool _debug_irq_disabled = false;
+
 void speccy_reset(speccy_t *vm) {
     memset(vm->mem, 0, sizeof(vm->mem));
     /* All keys up — the matrix is active-low. Bits 5..7 stay set
@@ -28,7 +33,13 @@ uint32_t speccy_step_frame(speccy_t *vm) {
     uint32_t executed = (uint32_t)Z80Emulate(&vm->z80,
                                              SPECCY_T_PER_FRAME,
                                              vm);
-    Z80Interrupt(&vm->z80, 0xFF, vm);
+    /* Snapshot PC for diagnostics — right after Z80Emulate, before
+     * Z80Interrupt potentially clobbers it with 0x0038. */
+    vm->pre_irq_pc = (uint16_t)vm->z80.pc;
+
+    if (!_debug_irq_disabled) {
+        Z80Interrupt(&vm->z80, 0xFF, vm);
+    }
     vm->frame_count++;
     return executed;
 }

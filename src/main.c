@@ -19,7 +19,7 @@
 #include "pci.h"
 #include "i2c.h"
 #include "hid.h"
-#include "ata.h"
+#include "nvme.h"
 #include "gfx.h"
 #include "rvvm.h"
 
@@ -107,16 +107,18 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     speccy_reset(&vm);
     memcpy(vm.mem, rom_48k, sizeof(rom_48k));
 
-    /* Optional snapshot via -ata <foo.sna>. We read up to 96 sectors
+    /* Optional snapshot via -nvme <foo.sna>. We read up to 96 LBAs
      * (49152 bytes) — enough for a .sna; .z80 snapshots are usually
-     * smaller. */
-    static uint8_t disk_buf[49179 + 512];   /* .sna + slack */
-    ata_t disk;
-    if (ata_init(&disk)) {
-        uint32_t sectors = sizeof(disk_buf) / 512;
-        uint32_t got = ata_read(&disk, 0, disk_buf, sectors);
+     * smaller. The buffer is page-aligned so NVMe can use a single
+     * PRP1+PRP2 or PRP-list transfer without bounce-copies. */
+    static uint8_t disk_buf[49664] __attribute__((aligned(NVME_PAGE_SIZE)));
+    static nvme_t  disk;
+    if (nvme_init(&disk)) {
+        uint32_t lbas = sizeof(disk_buf) / NVME_LBA_SIZE;
+        if (lbas > disk.num_lbas) lbas = disk.num_lbas;
+        uint32_t got = nvme_read(&disk, 0, disk_buf, lbas);
         if (got > 0) {
-            if (snapshot_load(&vm, disk_buf, got * 512)) {
+            if (snapshot_load(&vm, disk_buf, got * NVME_LBA_SIZE)) {
                 uart_puts("snapshot loaded.\n");
             } else {
                 uart_puts("disk present but no recognised snapshot format\n");

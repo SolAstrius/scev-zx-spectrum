@@ -109,8 +109,27 @@ bool speccy_hid_event(speccy_t *vm, uint8_t usage, bool pressed) {
 void speccy_set_key(speccy_t *vm, uint8_t row, uint8_t col, bool pressed) {
     if (row >= 8 || col >= 5) return;
     if (pressed) {
+        /* Force-release every key currently sitting in its release-
+         * latch window. Bits with latch == 0 are either "all up" or
+         * "actively held by host" — left alone. Bits with latch > 0
+         * are stale leftovers from a recently-released key; if we
+         * leave them BASIC's KEY-SCAN sees two keys held and treats
+         * it as ambiguous (or, for shift+key, as a spurious shifted
+         * variant of the new key). Dropping them here gives the new
+         * press a clean matrix to land in.
+         *
+         * Active shift keys (held by the user across multiple typed
+         * letters) are unaffected: their bits are cleared with
+         * latch == 0, so the loop skips them. */
+        for (int i = 0; i < 8 * 5; i++) {
+            if (vm->release_latch[i] == 0) continue;
+            int r = i / 5, c = i % 5;
+            if (r == row && c == col) continue;
+            vm->kbd[r] |= (uint8_t)(1u << c);
+            vm->release_latch[i] = 0;
+        }
         vm->kbd[row] &= (uint8_t)~(1u << col);
-        vm->release_latch[row * 5 + col] = 0;   /* cancel any pending release */
+        vm->release_latch[row * 5 + col] = 0;
     } else {
         /* Defer the actual release: keep the bit cleared, set a latch
          * so it stays pressed for KEY_RELEASE_LATCH frames before

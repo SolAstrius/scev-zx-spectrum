@@ -195,12 +195,46 @@ static void exec_command(speccy_t *vm, const char *cmd) {
         }
         break;
     }
+    case 's': {
+        /* Snapshot of the bottom 2 rows of screen RAM (the BASIC
+         * edit area) + their attributes. The K cursor lives here. */
+        uart_puts("bottom-2-rows bitmap (rows 22-23):\n");
+        for (uint32_t row = 22; row < 24; row++) {
+            for (uint32_t cx = 0; cx < 32; cx++) {
+                uint32_t x_pix = cx * 8;
+                uint32_t y_pix = row * 8;
+                /* Replicate render.c address math. */
+                uint32_t third = y_pix >> 6;
+                uint32_t lit   = y_pix & 0x3F;
+                uint32_t cr    = lit >> 3;
+                uint32_t lic   = lit & 7;
+                uint32_t addr  = 0x4000 + (third<<11) + (lic<<8) + (cr<<5) + (x_pix>>3);
+                uint8_t  bits  = vm->mem[addr];
+                /* Show only non-empty cells to highlight where text is. */
+                if (bits != 0 && bits != 0xFF) {
+                    uart_printf("  r%u c%u: bits=%x  attr=%x\n",
+                                (uint64_t)row, (uint64_t)cx, (uint64_t)bits,
+                                (uint64_t)vm->mem[0x5800 + row*32 + cx]);
+                }
+            }
+        }
+        /* And the cursor position from sysvars: K_CUR (DF-CCL) at 0x5C84
+         * is the lower-screen edit cursor offset; print it. */
+        uart_printf("DF_CC=%x  DF_CCL=%x  S_POSN=(%x,%x)\n",
+                    (uint64_t)(vm->mem[0x5C84] | (vm->mem[0x5C85] << 8)),
+                    (uint64_t)(vm->mem[0x5C86] | (vm->mem[0x5C87] << 8)),
+                    (uint64_t)vm->mem[0x5C88], (uint64_t)vm->mem[0x5C89]);
+        break;
+    }
     case 'h':
     default:
         uart_puts("debug commands (after `):\n"
                   "  d         dump Z80 registers\n"
                   "  m <hex>   dump 256 bytes from <hex>\n"
                   "  p         toggle periodic PC dump (every 1 s)\n"
+                  "  i         toggle Z80Interrupt injection\n"
+                  "  t         single-shot 16-step PC trace\n"
+                  "  s         snapshot bottom-of-screen text + cursor pos\n"
                   "  r         reset Z80 core\n"
                   "  h         this help\n");
         break;

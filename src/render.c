@@ -28,6 +28,12 @@ static const uint32_t SPECCY_PALETTE[16] = {
     0x0000FF00, 0x0000FFFF, 0x00FFFF00, 0x00FFFFFF,
 };
 
+/* FLASH (attr bit 7) inverts ink/paper every 16 frames, giving a
+ * 32-frame cycle = ~640 ms — matches the real Spectrum's vsync-driven
+ * flash. The render loop reads vm->frame_count and decides whether
+ * the current half of the cycle inverts. */
+#define FLASH_HALF_PERIOD   16
+
 static inline uint32_t bitmap_addr(uint32_t x, uint32_t y) {
     uint32_t third         = y >> 6;
     uint32_t line_in_third = y & 0x3F;
@@ -61,9 +67,13 @@ void speccy_render(speccy_t *vm, const gfx_t *g,
     gfx_rect(g, x0,                y0 + bw,           bw,          ph, border_color);            /* left */
     gfx_rect(g, x0 + bw + pw,      y0 + bw,           bw,          ph, border_color);            /* right */
 
-    /* Picture area — only redo if something in screen-RAM changed.
-     * Border-only updates skip this entirely. */
-    if (!vm->fb_dirty) return;
+    /* Picture area — redraw on screen-RAM change OR every flash half-
+     * period boundary so flashing cells get inverted. */
+    bool flash_phase = ((vm->frame_count / FLASH_HALF_PERIOD) & 1) != 0;
+    static uint64_t last_flash_phase_frame = 0;
+    bool flash_changed = (vm->frame_count - last_flash_phase_frame) >= FLASH_HALF_PERIOD;
+    if (!vm->fb_dirty && !flash_changed) return;
+    if (flash_changed) last_flash_phase_frame = vm->frame_count;
 
     uint32_t pic_x0 = x0 + bw;
     uint32_t pic_y0 = y0 + bw;
@@ -76,6 +86,13 @@ void speccy_render(speccy_t *vm, const gfx_t *g,
 
             uint32_t ink   = SPECCY_PALETTE[(attr & 0x07) | ((attr & 0x40) >> 3)];
             uint32_t paper = SPECCY_PALETTE[((attr >> 3) & 0x07) | ((attr & 0x40) >> 3)];
+
+            /* FLASH: when bit 7 is set and we're in the second half of
+             * the flash cycle, swap ink and paper. This is what makes
+             * the BASIC K-cursor flash. */
+            if ((attr & 0x80) && flash_phase) {
+                uint32_t tmp = ink; ink = paper; paper = tmp;
+            }
 
             for (uint32_t bit = 0; bit < 8; bit++) {
                 uint32_t color = (bits & (0x80 >> bit)) ? ink : paper;

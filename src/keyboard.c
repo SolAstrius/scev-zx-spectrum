@@ -23,10 +23,11 @@
 #include "keyboard.h"
 #include <stddef.h>
 
-#define R(row, col)   { (row), (col) }
-#define UNMAPPED      { 0xFF, 0xFF }
+/* `mapped` lets us distinguish a real CAPS SHIFT (row 0 col 0) from
+ * a default-zero-initialised table slot. Unset slots have mapped=0. */
+#define R(row, col)   { (row), (col), 1 }
 
-typedef struct { uint8_t row, col; } key_t;
+typedef struct { uint8_t row, col, mapped; } key_t;
 
 /* Indexed by USB HID usage code 0x00..0xE7. Sparse — most slots are
  * UNMAPPED. Sized to 0xE8 to cover modifier usage codes (LCTRL=0xE0
@@ -95,7 +96,7 @@ static const key_t hid_to_speccy[0xE8] = {
 bool keyboard_translate(uint8_t usage, uint8_t *out_row, uint8_t *out_col) {
     if (usage >= sizeof(hid_to_speccy) / sizeof(hid_to_speccy[0])) return false;
     key_t k = hid_to_speccy[usage];
-    if (k.row == 0xFF) return false;
+    if (!k.mapped) return false;
     *out_row = k.row;
     *out_col = k.col;
     return true;

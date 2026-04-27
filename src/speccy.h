@@ -36,6 +36,17 @@ typedef struct {
      * n is currently pressed. Bits 5..7 stay 1 (unused per ULA spec). */
     uint8_t   kbd[8];
 
+    /* Per-key release latch: when speccy_set_key(... false) is called
+     * we defer the actual bit-set in kbd[] for KEY_RELEASE_LATCH frames.
+     * That ensures BASIC's IRQ-driven KEYBOARD-SCAN observes the key
+     * pressed for at least a few frames even when the host's HID sends
+     * a press and release within one emulator frame.
+     *
+     * Indexed [row*5 + col]; 0 = key currently up, >0 = release pending
+     * in N frames. The bit in kbd[row] is held LOW (pressed) while
+     * either the key is genuinely held OR the latch is non-zero. */
+    uint8_t   release_latch[8 * 5];
+
     /* Last write to port 0xFE: low 3 bits = border colour, bit 4 =
      * beeper level. Bit 3 (MIC) is ignored; bit 5 unused. */
     uint8_t   border;

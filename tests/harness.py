@@ -41,6 +41,7 @@ from pathlib import Path
 
 DEFAULT_RVVM = "/home/sol/repos/RVVM/release.linux.x86_64/rvvm_x86_64"
 DEFAULT_FIRMWARE = Path(__file__).resolve().parent.parent / "firmware.bin"
+DEFAULT_ROM = Path(__file__).resolve().parent.parent / "roms" / "48.rom"
 
 
 class Harness:
@@ -54,8 +55,12 @@ class Harness:
         self.firmware = str(firmware)
         # Headless by default: nogui + nonet + hda_test to make HDA show
         # up on the PCI bus even though we don't render the framebuffer.
+        # ROM disk is mandatory after firmware refactor — the firmware
+        # halts at boot if controller 0 isn't an attached NVMe disk.
         # Caller can override with extra_args = ["-bochs_display", ...].
-        self.extra_args = extra_args or ["-nogui", "-nonet", "-hda_test"]
+        self.extra_args = extra_args or [
+            "-nogui", "-nonet", "-hda_test", "-nvme", str(DEFAULT_ROM),
+        ]
         self.proc: subprocess.Popen | None = None
         self._stdout_buf = ""
 

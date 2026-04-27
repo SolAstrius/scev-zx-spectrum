@@ -27,7 +27,6 @@
 #include "render.h"
 #include "snapshot.h"
 #include "debug.h"
-#include "rom_48k.h"
 
 #include <stddef.h>
 
@@ -103,25 +102,38 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         uart_puts("gfx: no display backend, running blind\n");
     }
 
-    /* Power-on Speccy + load ROM. */
+    /* Power-on Speccy + load ROM from -nvme controller 0.
+     *
+     * The ROM (16 KiB) is required — it's Sinclair BASIC, the entry point
+     * the Z80 jumps to at reset. Provided as a separate disk rather than
+     * baked into firmware so users can swap in alternate ROMs (Gosh
+     * Wonderful, diagnostic ROMs, foreign-language variants) without
+     * rebuilding. */
     speccy_reset(&vm);
-    memcpy(vm.mem, rom_48k, sizeof(rom_48k));
+    static nvme_t  rom_disk;
+    static uint8_t rom_buf[16384] __attribute__((aligned(NVME_PAGE_SIZE)));
+    if (!nvme_init_nth(&rom_disk, 0)
+        || nvme_read(&rom_disk, 0, rom_buf, sizeof(rom_buf) / NVME_LBA_SIZE)
+            != sizeof(rom_buf) / NVME_LBA_SIZE) {
+        uart_puts("FATAL: ROM disk not attached. Start RVVM with -nvme roms/48.rom\n");
+        for (;;) __asm__ volatile ("wfi");
+    }
+    memcpy(vm.mem, rom_buf, sizeof(rom_buf));
 
-    /* Optional snapshot via -nvme <foo.sna>. We read up to 96 LBAs
-     * (49152 bytes) — enough for a .sna; .z80 snapshots are usually
-     * smaller. The buffer is page-aligned so NVMe can use a single
-     * PRP1+PRP2 or PRP-list transfer without bounce-copies. */
+    /* Optional snapshot from -nvme controller 1 (NVMe device added second
+     * on the command line). 49 KiB buffer covers .sna + slack; page-aligned
+     * so NVMe can DMA into it directly. */
     static uint8_t disk_buf[49664] __attribute__((aligned(NVME_PAGE_SIZE)));
-    static nvme_t  disk;
-    if (nvme_init(&disk)) {
+    static nvme_t  snap_disk;
+    if (nvme_init_nth(&snap_disk, 1)) {
         uint32_t lbas = sizeof(disk_buf) / NVME_LBA_SIZE;
-        if (lbas > disk.num_lbas) lbas = disk.num_lbas;
-        uint32_t got = nvme_read(&disk, 0, disk_buf, lbas);
+        if (lbas > snap_disk.num_lbas) lbas = snap_disk.num_lbas;
+        uint32_t got = nvme_read(&snap_disk, 0, disk_buf, lbas);
         if (got > 0) {
             if (snapshot_load(&vm, disk_buf, got * NVME_LBA_SIZE)) {
                 uart_puts("snapshot loaded.\n");
             } else {
-                uart_puts("disk present but no recognised snapshot format\n");
+                uart_puts("disk 1 present but no recognised snapshot format\n");
             }
         }
     }

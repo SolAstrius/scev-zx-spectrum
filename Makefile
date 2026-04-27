@@ -6,8 +6,11 @@
 #
 # Build: `make`              produces firmware.bin
 # Run:   `make run`           boots under RVVM with -bochs_display + -hda_test
-#        `make run-snap SNAP=…/foo.sna`   load a snapshot via -ata
+#        `make run-snap SNAP=…/foo.sna`   load a snapshot off a 2nd disk
 # Clean: `make clean`
+#
+# ROM (roms/48.rom) is mandatory — it's loaded as the first NVMe disk.
+# Speccy-specific code reads 16 KiB from LBA 0 into vm.mem before reset.
 
 HAL      := vendor/rvvm-hal
 Z80      := vendor/z80emu
@@ -53,15 +56,17 @@ firmware.bin: firmware.elf
 	$(OBJCOPY) -O binary $< $@
 	@printf '\nBuilt %s (%s bytes)\n' "$@" "$$(stat -c %s $@)"
 
+ROM ?= roms/48.rom
+
 run: firmware.bin
-	$(RVVM) firmware.bin -bochs_display -nonet -hda_test
+	$(RVVM) firmware.bin -bochs_display -nonet -hda_test -nvme $(ROM)
 
 run-headless: firmware.bin
-	$(RVVM) firmware.bin -nogui -nonet -hda_test
+	$(RVVM) firmware.bin -nogui -nonet -hda_test -nvme $(ROM)
 
 run-snap: firmware.bin
 	@test -n "$(SNAP)" || { echo "usage: make run-snap SNAP=path/to/foo.sna"; exit 1; }
-	$(RVVM) firmware.bin -bochs_display -nonet -hda_test -ata $(SNAP)
+	$(RVVM) firmware.bin -bochs_display -nonet -hda_test -nvme $(ROM) -nvme $(SNAP)
 
 clean:
 	rm -rf build firmware.elf firmware.bin

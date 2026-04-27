@@ -47,12 +47,18 @@ extern "C" {
 
 #define Z80_WRITE_WORD_INTERRUPT(address, x) Z80_WRITE_WORD((address), (x))
 
-/* I/O — defer to the speccy_t-aware helpers. */
+/* I/O — defer to the speccy_t-aware helpers.
+ *
+ * Z80_OUTPUT_BYTE carries z80emu's local elapsed_cycles (T-states into
+ * the current Z80Emulate call) so speccy_out can timestamp the audio
+ * edge. The 3-arg form is a deliberate departure from upstream
+ * z80emu's macro signature — see vendor/z80emu/ SCEV PATCH comments
+ * at the OUT call sites. */
 #define Z80_INPUT_BYTE(port, x) \
     do { (x) = speccy_in(_SPECCY, (port)); } while (0)
 
-#define Z80_OUTPUT_BYTE(port, x) \
-    do { speccy_out(_SPECCY, (port), (x)); } while (0)
+#define Z80_OUTPUT_BYTE(port, x, cycles) \
+    do { speccy_out(_SPECCY, (port), (x), (uint32_t)(cycles)); } while (0)
 
 #ifdef __cplusplus
 }

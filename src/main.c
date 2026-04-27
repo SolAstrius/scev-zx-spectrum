@@ -163,6 +163,15 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
 
     debug_init(&vm);
 
+    /* Audio: bring up HDA + open the beeper edge channel. Failure
+     * (no -hda_test on the rvvm command line) is non-fatal — Speccy
+     * just runs silently. */
+    if (speccy_audio_init()) {
+        uart_puts("audio: beeper online (port $FE bit 4 → audio_edge)\n");
+    } else {
+        uart_puts("audio: backend unavailable, running silently\n");
+    }
+
     uart_printf("Booting %s...\n\n", rom_is_128k ? "128K editor" : "Sinclair BASIC");
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;

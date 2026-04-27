@@ -7,10 +7,42 @@ void *memset(void *dst, int c, unsigned long n);
 /* Defined in keyboard.c. */
 #include "keyboard.h"
 
+/* Audio HAL — beeper edge channel + cumulative T-state counter.
+ *
+ * The beeper is bit 4 of the byte written to port 0xFE. We feed
+ * audio_edge with the level changes timestamped in absolute T-states
+ * (since boot, monotonically increasing). audio_edge converts to host
+ * samples internally.
+ *
+ * total_t_states survives speccy_reset on purpose — the audio cycle
+ * timeline must stay monotonic across in-firmware resets, otherwise
+ * audio_edge_set would receive a cycle older than its origin and the
+ * resampler math goes negative. */
+#include "audio.h"
+#include "audio_edge.h"
+
+#define SPECCY_Z80_HZ      3500000ULL    /* 48K timing; 128K is 3.5469 MHz
+                                            but the audio resampler tolerates
+                                            the ~0.5% difference inaudibly */
+#define BEEPER_LEVEL_HIGH    0x4000
+#define BEEPER_LEVEL_LOW    -0x4000
+
+static audio_edge_t beeper;
+static bool         beeper_open       = false;
+static uint64_t     total_t_states    = 0;
+static uint64_t     frame_start_cycle = 0;
+
 /* Tweakable from debug.c — when true, speccy_step_frame skips the
  * Z80Interrupt call so we can observe the Z80 main loop without the
  * IRQ vector dominating PC samples. */
 bool _debug_irq_disabled = false;
+
+bool speccy_audio_init(void) {
+    if (!audio_init()) return false;
+    if (!audio_edge_open(&beeper, SPECCY_Z80_HZ)) return false;
+    beeper_open = true;
+    return true;
+}
 
 void speccy_apply_paging(speccy_t *vm) {
     if (vm->rom_idx >= SPECCY_NUM_ROM_BANKS) vm->rom_idx = 0;
@@ -189,6 +221,12 @@ uint32_t speccy_step_frame(speccy_t *vm) {
      * by the IRQ-time keyboard scan that runs inside Z80Emulate. */
     tick_release_latches(vm);
 
+    /* Snapshot the cycle counter at frame start. speccy_out reads
+     * this when stamping audio events: absolute_cycle =
+     * frame_start_cycle + cycles_in_frame (the latter is z80emu's
+     * elapsed_cycles passed through the OUT macro). */
+    frame_start_cycle = total_t_states;
+
     /* Run a frame's worth of T-states, then raise the vblank IRQ.
      * z80emu's "interrupt" path injects the bus value (0xFF for IM 1
      * or as the low half of the IM 2 vector); the Speccy ULA puts
@@ -197,6 +235,8 @@ uint32_t speccy_step_frame(speccy_t *vm) {
     uint32_t executed = (uint32_t)Z80Emulate(&vm->z80,
                                              vm->t_per_frame,
                                              vm);
+    total_t_states += executed;
+
     /* Snapshot PC for diagnostics — right after Z80Emulate, before
      * Z80Interrupt potentially clobbers it with 0x0038. */
     vm->pre_irq_pc = (uint16_t)vm->z80.pc;
@@ -204,6 +244,11 @@ uint32_t speccy_step_frame(speccy_t *vm) {
     if (!_debug_irq_disabled) {
         Z80Interrupt(&vm->z80, 0xFF, vm);
     }
+
+    /* Render this frame's audio. Cheap if no beeper writes happened —
+     * audio_edge fills the whole window with the holding level. */
+    if (beeper_open) audio_edge_advance(&beeper, total_t_states);
+
     vm->frame_count++;
     return executed;
 }
@@ -229,11 +274,19 @@ uint8_t speccy_in(speccy_t *vm, uint16_t port) {
     return 0xFF;
 }
 
-void speccy_out(speccy_t *vm, uint16_t port, uint8_t value) {
+void speccy_out(speccy_t *vm, uint16_t port, uint8_t value, uint32_t cycles) {
     /* ULA — any port with bit 0 = 0. */
     if ((port & 1) == 0) {
         vm->border = (uint8_t)(value & 0x07);
-        vm->beeper = (uint8_t)((value >> 4) & 1);
+        uint8_t new_beeper = (uint8_t)((value >> 4) & 1);
+        if (new_beeper != vm->beeper) {
+            vm->beeper = new_beeper;
+            if (beeper_open) {
+                audio_edge_set(&beeper,
+                               new_beeper ? BEEPER_LEVEL_HIGH : BEEPER_LEVEL_LOW,
+                               frame_start_cycle + cycles);
+            }
+        }
         return;
     }
 

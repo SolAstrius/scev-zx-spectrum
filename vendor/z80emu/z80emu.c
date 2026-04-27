@@ -2381,8 +2381,9 @@ emulate_next_instruction:
                                 int     n;
 
                                 READ_N(n);
-                                /* SCEV PATCH: full 16-bit port w/ A on high byte */
-                                Z80_OUTPUT_BYTE(((A) << 8) | (n), A);
+                                /* SCEV PATCH: full 16-bit port w/ A on high byte;
+                                 * pass elapsed_cycles for audio_edge timing. */
+                                Z80_OUTPUT_BYTE(((A) << 8) | (n), A, elapsed_cycles);
 
                                 elapsed_cycles += 4;
 
@@ -2397,7 +2398,7 @@ emulate_next_instruction:
                                 x = Y(opcode) != INDIRECT_HL
                                         ? R(Y(opcode))
                                         : 0;
-                                Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
+                                Z80_OUTPUT_BYTE(BC, x, elapsed_cycles);   /* SCEV PATCH: full BC + cycle stamp */
 
                                 elapsed_cycles += 4;
 
@@ -2410,7 +2411,7 @@ emulate_next_instruction:
                                 int     x, f;
 
                                 READ_BYTE(HL, x);
-                                Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
+                                Z80_OUTPUT_BYTE(BC, x, elapsed_cycles);   /* SCEV PATCH: full BC + cycle stamp */
 
                                 HL += opcode == OPCODE_OUTI ? +1 : -1;
 
@@ -2442,7 +2443,7 @@ emulate_next_instruction:
                                         r += 2;
 
                                         Z80_READ_BYTE(hl, x);
-                                        Z80_OUTPUT_BYTE(BC, x);   /* SCEV PATCH: full BC */
+                                        Z80_OUTPUT_BYTE(BC, x, elapsed_cycles);   /* SCEV PATCH: full BC + cycle stamp */
 
                                         hl += d;
                                         if (--b)

@@ -44,6 +44,25 @@ DEFAULT_FIRMWARE = Path(__file__).resolve().parent.parent / "firmware.bin"
 DEFAULT_ROM = Path(__file__).resolve().parent.parent / "roms" / "48.rom"
 
 
+def pad_to_lba(src: Path) -> Path:
+    """RVVM's NVMe truncates each block device to 512-byte boundary
+    (rvvm_blk_get_size >> 9). For files that aren't already a multiple
+    of 512, this drops the tail bytes. Returns either the original path
+    (if already aligned) or a temp file padded with zeros up to the
+    next 512-byte boundary. The returned path is safe to feed RVVM."""
+    src = Path(src)
+    size = src.stat().st_size
+    if size % 512 == 0:
+        return src
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=f"{src.stem}.padded.", suffix=src.suffix)
+    pad = (-size) % 512
+    with src.open("rb") as r, os.fdopen(fd, "wb") as w:
+        w.write(r.read())
+        w.write(b"\0" * pad)
+    return Path(tmp)
+
+
 class Harness:
     def __init__(
         self,

@@ -135,9 +135,16 @@ void speccy_kbd_enqueue(speccy_t *vm, uint8_t row, uint8_t col, bool pressed);
  * automatically on port 0x7FFD writes and after snapshot loads. */
 void speccy_apply_paging(speccy_t *vm);
 
-/* I/O — implemented in speccy.c, exposed for z80user.h's macros. */
+/* I/O — implemented in speccy.c, exposed for z80user.h's macros.
+ * speccy_out takes the elapsed-cycles count (T-states into the current
+ * Z80Emulate call) so it can timestamp ULA / AY audio edges. */
 uint8_t speccy_in (speccy_t *vm, uint16_t port);
-void    speccy_out(speccy_t *vm, uint16_t port, uint8_t value);
+void    speccy_out(speccy_t *vm, uint16_t port, uint8_t value, uint32_t cycles);
+
+/* Bring up the audio backend (HDA) and open the beeper edge channel.
+ * Call once at boot. Returns false if the backend isn't available —
+ * the Speccy keeps running, just silently. */
+bool    speccy_audio_init(void);
 
 /* Bank-aware memory accessors. Inlined for the Z80 hot loop —
  * z80user.h's READ_BYTE / WRITE_BYTE macros expand to these. */
@@ -157,8 +164,14 @@ static inline void speccy_write8(speccy_t *vm, uint16_t addr, uint8_t v) {
         vm->page_8000[addr - 0x8000] = v;
     } else {
         vm->page_C000[addr - 0xC000] = v;
-        /* Shadow-screen writes via bank 7 also dirty the framebuffer
-         * if 128K mode and shadow is the active display. */
-        if (vm->screen_idx == 7 && vm->ram_idx == 7) vm->fb_dirty = true;
+        /* If the bank currently mapped at 0xC000 IS the displayed
+         * screen (5 or 7), the write changes what the renderer will
+         * draw next frame. Covers both shadow display (ram_idx=7,
+         * screen_idx=7) and the 128K-only "screen aliased at 0xC000"
+         * trick (ram_idx=5, screen_idx=5). */
+        if (vm->ram_idx == vm->screen_idx
+            && (addr - 0xC000) < (SPECCY_ATTR_BASE + SPECCY_ATTR_SIZE - 0x4000)) {
+            vm->fb_dirty = true;
+        }
     }
 }

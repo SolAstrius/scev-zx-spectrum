@@ -71,6 +71,14 @@ into `build/z80emu.o` via the Makefile.
   | `INI` `IND` `INIR` `INDR`    | `C`  | `BC` |
   | `OUTI` `OUTD` `OTIR` `OTDR`  | `C`  | `BC` |
 
+  **Plus a 3rd argument on the OUT macro** — every `Z80_OUTPUT_BYTE`
+  call site additionally passes z80emu's local `elapsed_cycles` (T-
+  states into the current `Z80Emulate` call), which `speccy_out` uses
+  to timestamp beeper-bit changes for the audio HAL's edge tracker.
+  The 3-arg signature is a deliberate departure from upstream's macro;
+  the alternative is reconstructing per-cycle timing from `Z80_*` macro
+  call frequency, which is both lossy and more invasive.
+
   Why it matters: the Speccy ULA decodes keyboard reads on A8–A15 as
   the row-select mask (`speccy.c` does `row_select = ~(port >> 8)`).
   Without the patch `port >> 8` is always zero, the firmware sees "every
@@ -99,11 +107,13 @@ make run-snap SNAP=foo.sna       # mount a snapshot via -ata
 make run-headless    # no GUI, UART console only — useful for tests
 ```
 
-The flake also wires `LD_LIBRARY_PATH` for `libasound` and points
+The flake wires `LD_LIBRARY_PATH` for `libasound` and points
 `ALSA_PLUGIN_DIR` at PipeWire's alsa-lib bridge so RVVM's HDA backend
-finds an audio device on NixOS. (Audio output from the Speccy
-beeper itself is wired in firmware but compiled out — define
-`AUDIO_ENABLED` to turn it on once you trust the step path.)
+finds an audio device on NixOS. The Speccy beeper (port `$FE` bit 4)
+is fed into rvvm-hal's `audio_edge` primitive: every Z80 OUT to a ULA
+port stamps a level change in T-states, and once per frame the
+firmware tells the HAL to render samples up to the current cycle. No
+build flag — it's on whenever `make run`'s `-hda_test` succeeds.
 
 ## Running
 

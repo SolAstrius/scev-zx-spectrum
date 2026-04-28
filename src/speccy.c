@@ -21,11 +21,15 @@ void *memset(void *dst, int c, unsigned long n);
 #include "audio.h"
 #include "audio_edge.h"
 
-#define SPECCY_Z80_HZ      3500000ULL    /* 48K timing; 128K is 3.5469 MHz
-                                            but the audio resampler tolerates
-                                            the ~0.5% difference inaudibly */
-#define BEEPER_LEVEL_HIGH    0x4000
-#define BEEPER_LEVEL_LOW    -0x4000
+/* Z80 clock rates per mode. The audio_edge resampler converts cycle
+ * counts to host samples using this rate — getting it wrong by even
+ * 1% drifts the ring fill rate against the host drain rate, causing
+ * periodic stalls (audible as clicks). 128K's 3.5469 MHz comes from
+ * the Spectrum 128's PAL timing (228 T-states × 311 lines × 50 Hz). */
+#define SPECCY_Z80_HZ_48K      3500000ULL
+#define SPECCY_Z80_HZ_128K     3546900ULL
+#define BEEPER_LEVEL_HIGH      0x4000
+#define BEEPER_LEVEL_LOW      -0x4000
 
 static audio_edge_t beeper;
 static bool         beeper_open       = false;
@@ -37,9 +41,10 @@ static uint64_t     frame_start_cycle = 0;
  * IRQ vector dominating PC samples. */
 bool _debug_irq_disabled = false;
 
-bool speccy_audio_init(void) {
+bool speccy_audio_init(const speccy_t *vm) {
     if (!audio_init()) return false;
-    if (!audio_edge_open(&beeper, SPECCY_Z80_HZ)) return false;
+    uint64_t hz = vm->mode_128k ? SPECCY_Z80_HZ_128K : SPECCY_Z80_HZ_48K;
+    if (!audio_edge_open(&beeper, hz)) return false;
     beeper_open = true;
     return true;
 }

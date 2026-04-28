@@ -166,7 +166,7 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     /* Audio: bring up HDA + open the beeper edge channel. Failure
      * (no -hda_test on the rvvm command line) is non-fatal — Speccy
      * just runs silently. */
-    if (speccy_audio_init()) {
+    if (speccy_audio_init(&vm)) {
         uart_puts("audio: beeper online (port $FE bit 4 → audio_edge)\n");
     } else {
         uart_puts("audio: backend unavailable, running silently\n");
@@ -176,7 +176,14 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;
 
-    uint64_t deadline = time_now() + time_ticks_per_frame();
+    /* Pace at the Speccy's actual 50 Hz, NOT the HAL's hz/60 default.
+     * Each speccy_step_frame advances the emulator by one PAL frame's
+     * worth of T-states (= 1/50 s of emulator time); audio_edge
+     * generates exactly that many host samples per call. If wall-clock
+     * paces faster than 50 Hz, the audio ring overfills and the
+     * advance() wait kicks in, causing periodic clicks. */
+    const uint64_t ticks_per_frame = RVVM_TIME_HZ / SPECCY_FPS;
+    uint64_t deadline = time_now() + ticks_per_frame;
     for (;;) {
         hid_kb_poll(&kb, on_key, NULL);
         debug_poll(&vm, (uint32_t)vm.frame_count);
@@ -185,6 +192,6 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
             speccy_render(&vm, &g, x_off, y_off, DISPLAY_SCALE);
         }
         time_busy_until(deadline);
-        deadline += time_ticks_per_frame();
+        deadline += ticks_per_frame;
     }
 }

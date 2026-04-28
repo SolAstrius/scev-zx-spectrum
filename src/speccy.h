@@ -142,9 +142,10 @@ uint8_t speccy_in (speccy_t *vm, uint16_t port);
 void    speccy_out(speccy_t *vm, uint16_t port, uint8_t value, uint32_t cycles);
 
 /* Bring up the audio backend (HDA) and open the beeper edge channel.
- * Call once at boot. Returns false if the backend isn't available —
- * the Speccy keeps running, just silently. */
-bool    speccy_audio_init(void);
+ * Call once at boot, AFTER speccy_reset (so the 48K/128K Z80 clock
+ * rate is visible). Returns false if the backend isn't available —
+ * Speccy keeps running, just silently. */
+bool    speccy_audio_init(const speccy_t *vm);
 
 /* Bank-aware memory accessors. Inlined for the Z80 hot loop —
  * z80user.h's READ_BYTE / WRITE_BYTE macros expand to these. */

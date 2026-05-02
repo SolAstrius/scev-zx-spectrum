@@ -91,13 +91,25 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
     /* Graphics. We mode-set bochs (or accept simplefb) at exactly
      * 320×256 × 2 = 640×512 — covers the picture + 32-pixel border. */
     bool have_gfx = gfx_init_fdt(&g, &fdt, DISPLAY_W, DISPLAY_H);
+    bool db_gfx   = false;
     if (have_gfx) {
         /* Paint the whole surface in the power-on border colour
          * (white) so the unused area outside our window — under
          * simplefb where the surface may be larger than DISPLAY_W×H
          * — is sane rather than BSS-grey. */
         gfx_fill(&g, 0x00CDCDCD);
-        uart_puts("gfx: framebuffer up\n");
+        /* Page-flip via Bochs Y_OFFSET — host display only ever sees
+         * complete frames, no mid-render tearing. Both halves filled
+         * so the area outside the picture stays power-on-white across
+         * flips (only relevant on simplefb where g may exceed DISPLAY). */
+        if (gfx_enable_double_buffer(&g)) {
+            db_gfx = true;
+            gfx_fill(&g, 0x00CDCDCD);   /* fills back */
+            gfx_flip(&g);
+            gfx_fill(&g, 0x00CDCDCD);   /* fills new back */
+        }
+        uart_printf("gfx: framebuffer up%s\n",
+                    db_gfx ? " (double-buffered)" : "");
     } else {
         uart_puts("gfx: no display backend, running blind\n");
     }
@@ -190,6 +202,7 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         speccy_step_frame(&vm);
         if (have_gfx) {
             speccy_render(&vm, &g, x_off, y_off, DISPLAY_SCALE);
+            if (db_gfx) gfx_flip(&g);
         }
         time_busy_until(deadline);
         deadline += ticks_per_frame;
